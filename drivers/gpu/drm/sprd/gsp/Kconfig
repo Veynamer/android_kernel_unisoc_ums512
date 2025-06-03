@@ -12,4 +12,3 @@ config DRM_SPRD_GSP_IPC_TRUSTY
 	depends on TRUSTY_VIRTIO_IPC
 	---help---
 	  This function is to support the widevine function.
-
