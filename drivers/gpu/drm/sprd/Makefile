@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 
 ccflags-y := -I $(srctree)/$(src)
-subdir-ccflags-y += -I $(srctree)/$(src)/../../../devfreq/apsys/
 
 sprd-drm-y := \
 	sprd_drm.o \
 	sprd_gem.o \
 	sprd_crtc.o \
 	sprd_plane.o \
-	disp_lib.o \
-	sprd_dsc.o
+	disp_lib.o
 
 sprd-drm-$(CONFIG_TRUSTY_VIRTIO_IPC) += disp_trusty.o
 
@@ -35,8 +33,8 @@ sprd-drm-$(CONFIG_DRM_SPRD_DP) += \
 	dp/dp_link.o \
 	dp/dp_test.o \
 	dp/dp_video.o \
-	dp/dw_dptx.o \
-	dp/dp_audio.o
+	dp/dw_dptx.o
+	#dp/dp_audio.o \
 	#dp/dp_hdcp.o
 
 sprd-drm-$(CONFIG_DRM_SPRD_DPU1) += \

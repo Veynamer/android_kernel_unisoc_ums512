@@ -253,7 +253,25 @@ static const struct of_device_id dphy_match_table[] = {
 	  .data = &qogirn6pro_dphy },
 	{ /* sentinel */ },
 };
+static int boot_mode_check(void)
+{
+	struct device_node *np;
+	const char *cmd_line;
+	int ret = 0;
 
+	np = of_find_node_by_path("/chosen");
+	if (!np)
+		return 0;
+
+	ret = of_property_read_string(np, "bootargs", &cmd_line);
+	if (ret < 0)
+		return 0;
+
+	if (strstr(cmd_line, "androidboot.mode=cali"))
+		ret = 1;
+
+	return ret;
+}
 static int sprd_dphy_probe(struct platform_device *pdev)
 {
 	const struct sprd_dphy_ops *pdata;
@@ -264,7 +282,12 @@ static int sprd_dphy_probe(struct platform_device *pdev)
 	dphy = devm_kzalloc(&pdev->dev, sizeof(*dphy), GFP_KERNEL);
 	if (!dphy)
 		return -ENOMEM;
-
+		
+	if (boot_mode_check()) {
+		printk("Calibration Mode! Don't register sprd_dphy_probe");
+		return 0;
+	}
+	
 	dsi_dev = sprd_disp_pipe_get_input(&pdev->dev);
 	if (!dsi_dev)
 		return -ENODEV;

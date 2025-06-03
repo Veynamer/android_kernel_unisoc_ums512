@@ -242,10 +242,10 @@ irqreturn_t dptx_threaded_irq(int irq, void *dev)
 		hpdsts = dptx_readl(dptx, DPTX_HPDSTS);
 		if (hpdsts & DPTX_HPDSTS_STATUS) {
 			handle_hotplug(dptx);
-			extcon_set_state_sync(dptx->hdmi_edev, EXTCON_DISP_HDMI, 1);
+			extcon_set_state_sync(dptx->edev, EXTCON_DISP_HDMI, 1);
 		} else {
 			handle_hotunplug(dptx);
-			extcon_set_state_sync(dptx->hdmi_edev, EXTCON_DISP_HDMI, 0);
+			extcon_set_state_sync(dptx->edev, EXTCON_DISP_HDMI, 0);
 		}
 
 		if (dptx->drm_dev)
@@ -406,7 +406,7 @@ struct dptx *dptx_init(struct device *dev, struct drm_device *drm_dev)
 	mutex_init(&dptx->mutex);
 	dptx_misc_reset(dptx);
 	dptx_video_params_reset(dptx);
-	dptx_audio_params_reset(&dptx->aparams);
+	//dptx_audio_params_reset(&dptx->aparams);
 	atomic_set(&dptx->sink_request, 0);
 	atomic_set(&dptx->c_connect, 0);
 
@@ -423,14 +423,14 @@ struct dptx *dptx_init(struct device *dev, struct drm_device *drm_dev)
 	}
 
 	/* Allocate extcon device */
-	dptx->hdmi_edev = devm_extcon_dev_allocate(dptx->dev, dptx_extcon_cable);
-	if (IS_ERR(dptx->hdmi_edev)) {
+	dptx->edev = devm_extcon_dev_allocate(dptx->dev, dptx_extcon_cable);
+	if (IS_ERR(dptx->edev)) {
 		dev_err(dev, "failed to allocate memory for extcon\n");
 		retval = -ENOMEM;
 	};
 
 	/* Register extcon device */
-	retval = devm_extcon_dev_register(dptx->dev, dptx->hdmi_edev);
+	retval = devm_extcon_dev_register(dptx->dev, dptx->edev);
 	if (retval) {
 		dev_err(dev, "failed to register extcon device\n");
 		goto fail;

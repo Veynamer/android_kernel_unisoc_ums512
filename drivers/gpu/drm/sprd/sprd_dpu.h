@@ -21,17 +21,6 @@
 #include "disp_lib.h"
 #include "disp_trusty.h"
 #include "sprd_dsi.h"
-#include "sprd_dsi_panel.h"
-#include "dsi/sprd_dsi_api.h"
-#include "dsi/sprd_dsi_hal.h"
-#include "sprd_dsc.h"
-
-
-#define cabc_cfg0			268439552
-#define cabc_cfg1			268439552
-#define cabc_cfg2			16777215
-#define cabc_cfg3			0
-#define cabc_cfg4			0
 
 enum {
 	SPRD_DPU_IF_DBI = 0,
@@ -53,7 +42,6 @@ enum {
 	ENHANCE_CFG_ID_CABC,
 	ENHANCE_CFG_ID_CABC_MODE,
 	ENHANCE_CFG_ID_CABC_HIST,
-	ENHANCE_CFG_ID_CABC_HIST_V2,
 	ENHANCE_CFG_ID_VSYNC_COUNT,
 	ENHANCE_CFG_ID_FRAME_NO,
 	ENHANCE_CFG_ID_CABC_NO,
@@ -63,8 +51,6 @@ enum {
 	ENHANCE_CFG_ID_CABC_STATE,
 	ENHANCE_CFG_ID_SLP_LUT,
 	ENHANCE_CFG_ID_LUT3D,
-	ENHANCE_CFG_ID_UD,
-	ENHANCE_CFG_ID_UPDATE_LUTS,
 	ENHANCE_CFG_ID_SR_EPF,
 	ENHANCE_CFG_ID_MAX
 };
@@ -72,6 +58,8 @@ enum {
 struct dpu_context;
 
 struct dpu_core_ops {
+	int (*parse_dt)(struct dpu_context *ctx,
+			struct device_node *np);
 	void (*version)(struct dpu_context *ctx);
 	int (*init)(struct dpu_context *ctx);
 	void (*fini)(struct dpu_context *ctx);
@@ -87,12 +75,11 @@ struct dpu_core_ops {
 	void (*capability)(struct dpu_context *ctx,
 			 struct sprd_crtc_capability *cap);
 	void (*bg_color)(struct dpu_context *ctx, u32 color);
-	int (*context_init)(struct dpu_context *ctx, struct device_node *np);
+	int (*context_init)(struct dpu_context *ctx);
 	void (*enhance_set)(struct dpu_context *ctx, u32 id, void *param);
 	void (*enhance_get)(struct dpu_context *ctx, u32 id, void *param);
 	bool (*check_raw_int)(struct dpu_context *ctx, u32 mask);
 	int (*modeset)(struct dpu_context *ctx, struct drm_display_mode *mode);
-	void (*dma_request)(struct dpu_context *ctx);
 };
 
 struct dpu_clk_ops {
@@ -114,23 +101,6 @@ struct dpu_glb_ops {
 	void (*power)(struct dpu_context *ctx, int enable);
 };
 
-struct scale_config_param {
-	bool sr_mode_changed;
-	bool need_scale;
-	u8 skip_layer_index;
-	u32 in_w;
-	u32 in_h;
-	u32 out_w;
-	u32 out_h;
-};
-
-struct dpu_qos_cfg {
-	u8 arqos_low;
-	u8 arqos_high;
-	u8 awqos_low;
-	u8 awqos_high;
-};
-
 struct dpu_context {
 	/* dpu common parameters */
 	void __iomem *base;
@@ -145,14 +115,10 @@ struct dpu_context {
 	bool flip_pending;
 	wait_queue_head_t wait_queue;
 	bool evt_update;
-	bool evt_pq_update;
 	bool evt_all_update;
-	bool evt_all_regs_update;
-	bool evt_pq_lut_update;
 	bool evt_stop;
 	irqreturn_t (*dpu_isr)(int irq, void *data);
 	struct tasklet_struct dvfs_task;
-	bool is_single_run;
 
 	/* pq enhance parameters */
 	void *enhance;
@@ -183,24 +149,13 @@ struct dpu_context {
 	int sprd_corner_radius;
 	bool sprd_corner_support;
 
-	void *layer_top;
-	void *layer_bottom;
-	dma_addr_t layer_top_p;
-	dma_addr_t layer_bottom_p;
+	unsigned int *layer_top;
+	unsigned int *layer_bottom;
 
 	/* widevine config parameters */
-	bool secure_debug;
-	bool fastcall_en;
+	int secure_debug;
 	int time;
 	struct disp_message *tos_msg;
-
-	/* vrr config parameters */
-	bool fps_mode_changed;
-	bool wb_size_changed;
-
-	/* dsc config parameters */
-	struct dsc_cfg dsc_cfg;
-	struct dsc_init_param dsc_init;
 
 	/* other specific parameters */
 	bool panel_ready;
@@ -208,12 +163,6 @@ struct dpu_context {
 	unsigned long logo_size;
 	u32 prev_y2r_coef;
 	u64 frame_count;
-
-	/* scaling config parameters */
-	struct scale_config_param scale_cfg;
-
-	/* qos config parameters */
-	struct dpu_qos_cfg qos_cfg;
 };
 
 struct sprd_dpu_ops {
@@ -236,9 +185,6 @@ struct sprd_dpu {
 void sprd_dpu_run(struct sprd_dpu *dpu);
 void sprd_dpu_stop(struct sprd_dpu *dpu);
 void sprd_dpu_atomic_disable_force(struct drm_crtc *crtc);
-void sprd_dpu_resume(struct sprd_dpu *dpu);
-void sprd_dpu_disable(struct sprd_dpu *dpu);
-extern int dpu_r6p0_enable_div6_clk(struct dpu_context *ctx);
 
 extern const struct dpu_clk_ops sharkle_dpu_clk_ops;
 extern const struct dpu_glb_ops sharkle_dpu_glb_ops;

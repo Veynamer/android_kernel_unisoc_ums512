@@ -73,13 +73,10 @@ static int sprd_pwm_backlight_update(struct backlight_device *bd)
 
 	pwm_get_state(bl->pwm, &state);
 	if (level > 0) {
-		if (bl->cabc_en) {
-			if (bl->cabc_refer_level == 0)
-				duty_cycle = level;
-			else
-				duty_cycle = DIV_ROUND_CLOSEST_ULL(bl->cabc_level *
-					level, bl->cabc_refer_level);
-		} else
+		if (bl->cabc_en)
+			duty_cycle = DIV_ROUND_CLOSEST_ULL(bl->cabc_level *
+				level, bl->cabc_refer_level);
+		else
 			duty_cycle = level;
 
 		pr_debug("pwm brightness level: %llu\n", duty_cycle);
@@ -163,7 +160,25 @@ static int sprd_backlight_parse_dt(struct device *dev,
 
 	return 0;
 }
+static int boot_mode_check(void)
+{
+	struct device_node *np;
+	const char *cmd_line;
+	int ret = 0;
 
+	np = of_find_node_by_path("/chosen");
+	if (!np)
+		return 0;
+
+	ret = of_property_read_string(np, "bootargs", &cmd_line);
+	if (ret < 0)
+		return 0;
+
+	if (strstr(cmd_line, "androidboot.mode=cali"))
+		ret = 1;
+
+	return ret;
+}
 static int sprd_backlight_probe(struct platform_device *pdev)
 {
 	struct backlight_device *bd;
@@ -175,7 +190,12 @@ static int sprd_backlight_probe(struct platform_device *pdev)
 			sizeof(struct sprd_backlight), GFP_KERNEL);
 	if (!bl)
 		return -ENOMEM;
-
+		
+	if (boot_mode_check()) {
+		printk("Calibration Mode! Don't register sprd_backlight_probe");
+		return 0;
+	}
+	
 	ret = sprd_backlight_parse_dt(&pdev->dev, bl);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to parse sprd backlight\n");

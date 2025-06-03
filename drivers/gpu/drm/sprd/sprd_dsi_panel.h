@@ -22,8 +22,8 @@ enum {
 	CMD_OLED_BRIGHTNESS,
 	CMD_OLED_REG_LOCK,
 	CMD_OLED_REG_UNLOCK,
-	CMD_CODE_DOZE_IN,
-	CMD_CODE_DOZE_OUT,
+	CMD_CODE_RESERVED0,
+	CMD_CODE_RESERVED1,
 	CMD_CODE_RESERVED2,
 	CMD_CODE_RESERVED3,
 	CMD_CODE_RESERVED4,
@@ -42,6 +42,7 @@ enum {
 	ESD_MODE_REG_CHECK,
 	ESD_MODE_TE_CHECK,
 	ESD_MODE_MIX_CHECK,
+	ESD_MODE_REDOWNLOAD_CHECK,
 };
 
 struct dsi_cmd_desc {
@@ -67,23 +68,15 @@ struct panel_info {
 	struct device_node *of_node;
 	struct drm_display_mode mode;
 	struct drm_display_mode *buildin_modes;
-	int display_mode_count;
 	int num_buildin_modes;
 	struct gpio_desc *avdd_gpio;
 	struct gpio_desc *avee_gpio;
 	struct gpio_desc *reset_gpio;
-    struct gpio_desc *tp3v3en_gpio;
-    struct gpio_desc *lcm1v8en_gpio;
+	struct gpio_desc *vdd2v8_en_gpio;
 	struct reset_sequence rst_on_seq;
 	struct reset_sequence rst_off_seq;
 	const void *cmds[CMD_CODE_MAX];
 	int cmds_len[CMD_CODE_MAX];
-
-	u32 slice_width;
-	u32 slice_height;
-	u32 output_bpc;
-	u32 dsc_en;
-	u32 dual_dsi_en;
 
 	/* esd check parameters*/
 	bool esd_check_en;
@@ -113,7 +106,6 @@ struct sprd_panel {
 	bool esd_work_pending;
 	struct mutex lock;
 	bool enabled;
-	bool is_esd_rst;
 };
 
 struct sprd_oled {
@@ -127,7 +119,5 @@ struct sprd_oled {
 
 int sprd_panel_parse_lcddtb(struct device_node *lcd_node,
 	struct sprd_panel *panel);
-void  sprd_panel_enter_doze(struct drm_panel *p);
-void  sprd_panel_exit_doze(struct drm_panel *p);
 
 #endif /* _SPRD_DSI_PANEL_H_ */

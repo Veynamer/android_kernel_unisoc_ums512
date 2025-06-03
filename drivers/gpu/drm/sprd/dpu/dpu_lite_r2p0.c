@@ -3,7 +3,6 @@
  * Copyright (C) 2020 Unisoc Inc.
  */
 
-#include <drm/drm_vblank.h>
 #include <linux/delay.h>
 #include <linux/dma-buf.h>
 #include <linux/module.h>
@@ -215,6 +214,18 @@ struct wb_region {
 	u16 size_h;
 };
 
+struct dpu_cfg1 {
+	u8 arqos_low;
+	u8 arqos_high;
+	u8 awqos_low;
+	u8 awqos_high;
+};
+
+struct scale_cfg {
+	u32 in_w;
+	u32 in_h;
+};
+
 struct epf_cfg {
 	u16 epsilon0;
 	u16 epsilon1;
@@ -270,8 +281,11 @@ struct slp_cfg {
 };
 
 struct dpu_enhance {
+	bool need_scale;
+	bool mode_changed;
 	u32 enhance_en;
 
+	struct scale_cfg scale_copy;
 	struct slp_cfg slp_copy;
 	struct epf_cfg epf_copy;
 	struct cm_cfg cm_copy;
@@ -279,7 +293,14 @@ struct dpu_enhance {
 	struct gamma_lut gamma_copy;
 };
 
-static struct wb_region region[3];
+static struct dpu_cfg1 qos_cfg = {
+	.arqos_low = 0x1,
+	.arqos_high = 0x7,
+	.awqos_low = 0x1,
+	.awqos_high = 0x7,
+};
+
+// static struct wb_region region[3];
 
 static void dpu_enhance_reload(struct dpu_context *ctx);
 static void dpu_clean_all(struct dpu_context *ctx);
@@ -301,6 +322,39 @@ static bool dpu_check_raw_int(struct dpu_context *ctx, u32 mask)
 
 	pr_err("dpu_int_raw:0x%x\n", reg_val);
 	return false;
+}
+
+static int dpu_parse_dt(struct dpu_context *ctx,
+				struct device_node *np)
+{
+	int ret;
+	struct device_node *qos_np;
+
+	qos_np = of_parse_phandle(np, "sprd,qos", 0);
+	if (!qos_np)
+		pr_warn("can't find dpu qos cfg node\n");
+
+	ret = of_property_read_u8(qos_np, "arqos-low",
+					&qos_cfg.arqos_low);
+	if (ret)
+		pr_warn("read arqos-low failed, use default\n");
+
+	ret = of_property_read_u8(qos_np, "arqos-high",
+					&qos_cfg.arqos_high);
+	if (ret)
+		pr_warn("read arqos-high failed, use default\n");
+
+	ret = of_property_read_u8(qos_np, "awqos-low",
+					&qos_cfg.awqos_low);
+	if (ret)
+		pr_warn("read awqos_low failed, use default\n");
+
+	ret = of_property_read_u8(qos_np, "awqos-high",
+					&qos_cfg.awqos_high);
+	if (ret)
+		pr_warn("read awqos-high failed, use default\n");
+
+	return 0;
 }
 
 static void dpu_dump(struct dpu_context *ctx)
@@ -347,8 +401,6 @@ static u32 check_mmu_isr(struct dpu_context *ctx, u32 reg_val)
 
 static u32 dpu_isr(struct dpu_context *ctx)
 {
-	struct sprd_dpu *dpu =
-		(struct sprd_dpu *)container_of(ctx, struct sprd_dpu, ctx);
 	u32 reg_val, int_mask = 0;
 
 	reg_val = DPU_REG_RD(ctx->base + REG_DPU_INT_STS);
@@ -365,8 +417,6 @@ static u32 dpu_isr(struct dpu_context *ctx)
 
 	/* dpu vsync isr */
 	if (reg_val & BIT_DPU_INT_VSYNC) {
-		drm_crtc_handle_vblank(&dpu->crtc->base);
-
 		/* write back feature */
 		if ((ctx->vsync_count == ctx->max_vsync_count) && ctx->wb_en)
 			schedule_work(&ctx->wb_work);
@@ -379,32 +429,32 @@ static u32 dpu_isr(struct dpu_context *ctx)
 		wake_up_interruptible_all(&ctx->wait_queue);
 	}
 
-	/* dpu write back done isr */
-	if (reg_val & BIT_DPU_INT_WB_DONE) {
-		/*
-		 * The write back is a time-consuming operation. If there is a
-		 * flip occurs before write back done, the write back buffer is
-		 * no need to display. Otherwise the new frame will be covered
-		 * by the write back buffer, which is not what we wanted.
-		 */
-		if ((ctx->vsync_count > ctx->max_vsync_count) && ctx->wb_en) {
-			ctx->wb_en = false;
-			schedule_work(&ctx->wb_work);
-			/*reg_val |= DISPC_INT_FENCE_SIGNAL_REQUEST;*/
-		}
+	// /* dpu write back done isr */
+	// if (reg_val & BIT_DPU_INT_WB_DONE) {
+	// 	/*
+	// 	 * The write back is a time-consuming operation. If there is a
+	// 	 * flip occurs before write back done, the write back buffer is
+	// 	 * no need to display. Otherwise the new frame will be covered
+	// 	 * by the write back buffer, which is not what we wanted.
+	// 	 */
+	// 	if ((ctx->vsync_count > ctx->max_vsync_count) && ctx->wb_en) {
+	// 		ctx->wb_en = false;
+	// 		schedule_work(&ctx->wb_work);
+	// 		/*reg_val |= DISPC_INT_FENCE_SIGNAL_REQUEST;*/
+	// 	}
 
-		pr_debug("wb done\n");
-	}
+	// 	pr_debug("wb done\n");
+	// }
 
-	/* dpu write back error isr */
-	if (reg_val & BIT_DPU_INT_WB_ERR) {
-		pr_err("dpu write back fail\n");
-		/* give a new chance for write back */
-		if (ctx->max_vsync_count > 0) {
-			ctx->wb_en = true;
-			ctx->vsync_count = 0;
-		}
-	}
+	// /* dpu write back error isr */
+	// if (reg_val & BIT_DPU_INT_WB_ERR) {
+	// 	pr_err("dpu write back fail\n");
+	// 	/* give a new chance for write back */
+	// 	if (ctx->max_vsync_count > 0) {
+	// 		ctx->wb_en = true;
+	// 		ctx->vsync_count = 0;
+	// 	}
+	// }
 
 	/* dpu ifbc payload error isr */
 	if (reg_val & BIT_DPU_INT_FBC_PLD_ERR) {
@@ -503,133 +553,133 @@ static void dpu_run(struct dpu_context *ctx)
 	}
 }
 
-static void dpu_write_back(struct dpu_context *ctx,
-		u8 count, bool debug)
-{
-	int i, index;
+// static void dpu_write_back(struct dpu_context *ctx,
+// 		u8 count, bool debug)
+// {
+// 	int i, index;
 
-	for (i = 0; i < count; i++) {
-		index = region[i].index;
-		DPU_REG_WR(ctx->base + REG_WB_R0_POS + i * DPU_REG_SIZE,
-				(region[i].pos_x >> 3) | ((region[i].pos_y >> 3) << 16));
-		DPU_REG_WR(ctx->base + REG_WB_R0_SIZE + i * DPU_REG_SIZE,
-				(region[i].size_w >> 3) | ((region[i].size_h >> 3) << 16));
-	}
+// 	for (i = 0; i < count; i++) {
+// 		index = region[i].index;
+// 		DPU_REG_WR(ctx->base + REG_WB_R0_POS + i * DPU_REG_SIZE,
+// 				(region[i].pos_x >> 3) | ((region[i].pos_y >> 3) << 16));
+// 		DPU_REG_WR(ctx->base + REG_WB_R0_SIZE + i * DPU_REG_SIZE,
+// 				(region[i].size_w >> 3) | ((region[i].size_h >> 3) << 16));
+// 	}
 
-	if (ctx->wb_xfbc_en && !debug) {
-		DPU_REG_WR(ctx->base + REG_WB_CFG, (2 << 1) | BIT(0));
-		DPU_REG_WR(ctx->base + REG_WB_BASE_ADDR, ctx->wb_layer.addr[0] +
-				ctx->wb_layer.fbc_hsize_r);
-	} else {
-		DPU_REG_WR(ctx->base + REG_WB_CFG, 0);
-		DPU_REG_WR(ctx->base + REG_WB_BASE_ADDR, ctx->wb_layer.addr[0]);
-	}
-	DPU_REG_WR(ctx->base + REG_WB_PITCH, ctx->vm.hactive);
+// 	if (ctx->wb_xfbc_en && !debug) {
+// 		DPU_REG_WR(ctx->base + REG_WB_CFG, (2 << 1) | BIT(0));
+// 		DPU_REG_WR(ctx->base + REG_WB_BASE_ADDR, ctx->wb_layer.addr[0] +
+// 				ctx->wb_layer.fbc_hsize_r);
+// 	} else {
+// 		DPU_REG_WR(ctx->base + REG_WB_CFG, 0);
+// 		DPU_REG_WR(ctx->base + REG_WB_BASE_ADDR, ctx->wb_layer.addr[0]);
+// 	}
+// 	DPU_REG_WR(ctx->base + REG_WB_PITCH, ctx->vm.hactive);
 
-	/* update trigger */
-	DPU_REG_SET(ctx->base + REG_DPU_CTRL, BIT(2));
+// 	/* update trigger */
+// 	DPU_REG_SET(ctx->base + REG_DPU_CTRL, BIT(2));
 
-	if (debug)
-		/* writeback debug trigger */
-		DPU_REG_WR(ctx->base + REG_WB_CTRL, BIT(3));
-	else {
-		/* writeback trigger */
-		for (i = 0; i < count; i++) {
-			index = region[i].index;
-			DPU_REG_SET(ctx->base + REG_WB_CTRL, 1 << index);
-		}
-	}
+// 	if (debug)
+// 		/* writeback debug trigger */
+// 		DPU_REG_WR(ctx->base + REG_WB_CTRL, BIT(3));
+// 	else {
+// 		/* writeback trigger */
+// 		for (i = 0; i < count; i++) {
+// 			index = region[i].index;
+// 			DPU_REG_SET(ctx->base + REG_WB_CTRL, 1 << index);
+// 		}
+// 	}
 
-	dpu_wait_update_done(ctx);
+// 	dpu_wait_update_done(ctx);
 
-	pr_debug("write back trigger\n");
-}
+// 	pr_debug("write back trigger\n");
+// }
 
-static void dpu_wb_flip(struct dpu_context *ctx)
-{
-	dpu_clean_all(ctx);
-	dpu_layer(ctx, &ctx->wb_layer);
+// static void dpu_wb_flip(struct dpu_context *ctx)
+// {
+// 	dpu_clean_all(ctx);
+// 	dpu_layer(ctx, &ctx->wb_layer);
 
-	DPU_REG_SET(ctx->base + REG_WB_CTRL, BIT(2));
-	dpu_wait_update_done(ctx);
+// 	DPU_REG_SET(ctx->base + REG_WB_CTRL, BIT(2));
+// 	dpu_wait_update_done(ctx);
 
-	pr_debug("write back flip\n");
-}
+// 	pr_debug("write back flip\n");
+// }
 
-static void dpu_wb_work_func(struct work_struct *data)
-{
-	struct dpu_context *ctx =
-		container_of(data, struct dpu_context, wb_work);
+// static void dpu_wb_work_func(struct work_struct *data)
+// {
+// 	struct dpu_context *ctx =
+// 		container_of(data, struct dpu_context, wb_work);
 
-	down(&ctx->lock);
+// 	down(&ctx->lock);
 
-	if (!ctx->enabled) {
-		up(&ctx->lock);
-		pr_err("dpu is not initialized\n");
-		return;
-	}
+// 	if (!ctx->enabled) {
+// 		up(&ctx->lock);
+// 		pr_err("dpu is not initialized\n");
+// 		return;
+// 	}
 
-	if (ctx->flip_pending) {
-		up(&ctx->lock);
-		pr_warn("dpu flip is disabled\n");
-		return;
-	}
+// 	if (ctx->flip_pending) {
+// 		up(&ctx->lock);
+// 		pr_warn("dpu flip is disabled\n");
+// 		return;
+// 	}
 
-	if (ctx->wb_en && (ctx->vsync_count > ctx->max_vsync_count))
-		dpu_write_back(ctx, 1, false);
-	else if (!ctx->wb_en)
-		dpu_wb_flip(ctx);
+// 	if (ctx->wb_en && (ctx->vsync_count > ctx->max_vsync_count))
+// 		dpu_write_back(ctx, 1, false);
+// 	else if (!ctx->wb_en)
+// 		dpu_wb_flip(ctx);
 
-	up(&ctx->lock);
-}
+// 	up(&ctx->lock);
+// }
 
-static int dpu_write_back_config(struct dpu_context *ctx)
-{
-	u32 wb_hdr_size;
-	size_t wb_buf_size;
-	struct sprd_dpu *dpu =
-		(struct sprd_dpu *)container_of(ctx, struct sprd_dpu, ctx);
-	struct drm_device *drm = dpu->crtc->base.dev;
+// static int dpu_write_back_config(struct dpu_context *ctx)
+// {
+// 	u32 wb_hdr_size;
+// 	size_t wb_buf_size;
+// 	struct sprd_dpu *dpu =
+// 		(struct sprd_dpu *)container_of(ctx, struct sprd_dpu, ctx);
+// 	struct drm_device *drm = dpu->crtc->base.dev;
 
-	if (ctx->wb_configed) {
-		pr_debug("write back has configed\n");
-		return 0;
-	}
+// 	if (ctx->wb_configed) {
+// 		pr_debug("write back has configed\n");
+// 		return 0;
+// 	}
 
-	wb_buf_size = XFBC8888_BUFFER_SIZE(ctx->vm.hactive, ctx->vm.vactive);
-	wb_hdr_size = XFBC8888_HEADER_SIZE(ctx->vm.hactive, ctx->vm.vactive);
-	pr_info("use cma memory for writeback, size:0x%zx\n", wb_buf_size);
-	ctx->wb_addr_v = dma_alloc_wc(drm->dev, wb_buf_size, &ctx->wb_addr_p, GFP_KERNEL);
-	if (!ctx->wb_addr_p) {
-		ctx->max_vsync_count = 0;
-		return -ENOMEM;
-	}
+// 	wb_buf_size = XFBC8888_BUFFER_SIZE(ctx->vm.hactive, ctx->vm.vactive);
+// 	wb_hdr_size = XFBC8888_HEADER_SIZE(ctx->vm.hactive, ctx->vm.vactive);
+// 	pr_info("use cma memory for writeback, size:0x%zx\n", wb_buf_size);
+// 	ctx->wb_addr_v = dma_alloc_wc(drm->dev, wb_buf_size, &ctx->wb_addr_p, GFP_KERNEL);
+// 	if (!ctx->wb_addr_p) {
+// 		ctx->max_vsync_count = 0;
+// 		return -ENOMEM;
+// 	}
 
-	region[0].index = 0;
-	region[0].pos_x = 0;
-	region[0].pos_y = 0;
-	region[0].size_w = ctx->vm.hactive;
-	region[0].size_h = ctx->vm.vactive;
+// 	region[0].index = 0;
+// 	region[0].pos_x = 0;
+// 	region[0].pos_y = 0;
+// 	region[0].size_w = ctx->vm.hactive;
+// 	region[0].size_h = ctx->vm.vactive;
 
-	ctx->wb_layer.index = 7;
-	ctx->wb_layer.planes = 1;
-	ctx->wb_layer.alpha = 0xff;
-	ctx->wb_layer.dst_w = ctx->vm.hactive;
-	ctx->wb_layer.dst_h = ctx->vm.vactive;
-	ctx->wb_layer.format = DRM_FORMAT_ABGR8888;
-	ctx->wb_layer.xfbc = ctx->wb_xfbc_en;
-	ctx->wb_layer.pitch[0] = ctx->vm.hactive * 4;
-	ctx->wb_layer.addr[0] = ctx->wb_addr_p;
-	ctx->wb_layer.fbc_hsize_r = wb_hdr_size;
+// 	ctx->wb_layer.index = 7;
+// 	ctx->wb_layer.planes = 1;
+// 	ctx->wb_layer.alpha = 0xff;
+// 	ctx->wb_layer.dst_w = ctx->vm.hactive;
+// 	ctx->wb_layer.dst_h = ctx->vm.vactive;
+// 	ctx->wb_layer.format = DRM_FORMAT_ABGR8888;
+// 	ctx->wb_layer.xfbc = ctx->wb_xfbc_en;
+// 	ctx->wb_layer.pitch[0] = ctx->vm.hactive * 4;
+// 	ctx->wb_layer.addr[0] = ctx->wb_addr_p;
+// 	ctx->wb_layer.fbc_hsize_r = wb_hdr_size;
 
-	ctx->max_vsync_count = 4;
+// 	ctx->max_vsync_count = 4;
 
-	ctx->wb_configed = true;
+// 	ctx->wb_configed = true;
 
-	INIT_WORK(&ctx->wb_work, dpu_wb_work_func);
+// 	INIT_WORK(&ctx->wb_work, dpu_wb_work_func);
 
-	return 0;
-}
+// 	return 0;
+// }
 
 static int dpu_init(struct dpu_context *ctx)
 {
@@ -644,10 +694,10 @@ static int dpu_init(struct dpu_context *ctx)
 	DPU_REG_WR(ctx->base + REG_BLEND_SIZE, size);
 
 	DPU_REG_WR(ctx->base + REG_DPU_CFG0, 0x00);
-	reg_val = (ctx->qos_cfg.awqos_high << 12) |
-		(ctx->qos_cfg.awqos_low << 8) |
-		(ctx->qos_cfg.arqos_high << 4) |
-		(ctx->qos_cfg.arqos_low) | BIT(18) | BIT(22);
+	reg_val = (qos_cfg.awqos_high << 12) |
+		(qos_cfg.awqos_low << 8) |
+		(qos_cfg.arqos_high << 4) |
+		(qos_cfg.arqos_low) | BIT(18) | BIT(22);
 	DPU_REG_WR(ctx->base + REG_DPU_CFG1, reg_val);
 	DPU_REG_WR(ctx->base + REG_DPU_CFG2, 0x14002);
 
@@ -664,7 +714,7 @@ static int dpu_init(struct dpu_context *ctx)
 	DPU_REG_WR(ctx->base + REG_DPU_INT_CLR, 0xffff);
 
 	dpu_enhance_reload(ctx);
-	dpu_write_back_config(ctx);
+	// dpu_write_back_config(ctx);
 
 	return 0;
 }
@@ -789,6 +839,13 @@ static u32 dpu_img_ctrl(u32 format, u32 blending, u32 compression, u32 y2r_coef,
 		/*UV endian */
 		reg_val |= BIT_DPU_LAY_DATA_ENDIAN_B0B1B2B3;
 		break;
+       case DRM_FORMAT_YVU420:
+                reg_val |= BIT_DPU_LAY_FORMAT_YUV420_3PLANE;
+                /*Y endian */
+                reg_val |= BIT_DPU_LAY_DATA_ENDIAN_B0B1B2B3;
+                /*UV endian */
+                reg_val |= BIT_DPU_LAY_RGB888_RB_SWITCH;
+                break;
 	default:
 		pr_err("error: invalid format %c%c%c%c\n", format,
 						format >> 8,
@@ -1037,10 +1094,10 @@ static void dpu_dpi_init(struct dpu_context *ctx)
 		int_mask |= BIT_DPU_INT_TE;
 		/* enable underflow err INT */
 		int_mask |= BIT_DPU_INT_ERR;
-		/* enable write back done INT */
-		int_mask |= BIT_DPU_INT_WB_DONE;
-		/* enable write back fail INT */
-		int_mask |= BIT_DPU_INT_WB_ERR;
+		// /* enable write back done INT */
+		// int_mask |= BIT_DPU_INT_WB_DONE;
+		// /* enable write back fail INT */
+		// int_mask |= BIT_DPU_INT_WB_ERR;
 
 	} else if (ctx->if_type == SPRD_DPU_IF_EDPI) {
 		/* use edpi as interface */
@@ -1084,44 +1141,9 @@ static void disable_vsync(struct dpu_context *ctx)
 	DPU_REG_CLR(ctx->base + REG_DPU_INT_EN, BIT_DPU_INT_VSYNC);
 }
 
-static int dpu_context_init(struct dpu_context *ctx, struct device_node *np)
+static int dpu_context_init(struct dpu_context *ctx)
 {
 	struct dpu_enhance *enhance;
-	struct device_node *qos_np;
-	int ret;
-
-	qos_np = of_parse_phandle(np, "sprd,qos", 0);
-	if (!qos_np)
-		pr_warn("can't find dpu qos cfg node\n");
-
-	ret = of_property_read_u8(qos_np, "arqos-low",
-					&ctx->qos_cfg.arqos_low);
-	if (ret) {
-		ctx->qos_cfg.arqos_low = 0x1;
-		pr_warn("read arqos-low failed, use default\n");
-	}
-
-	ret = of_property_read_u8(qos_np, "arqos-high",
-					&ctx->qos_cfg.arqos_high);
-	if (ret) {
-		pr_warn("read arqos-high failed, use default\n");
-		ctx->qos_cfg.arqos_high = 0x7;
-	}
-
-	ret = of_property_read_u8(qos_np, "awqos-low",
-					&ctx->qos_cfg.awqos_low);
-	if (ret) {
-		pr_warn("read awqos_low failed, use default\n");
-		ctx->qos_cfg.awqos_low = 0x1;
-	}
-
-	ret = of_property_read_u8(qos_np, "awqos-high",
-					&ctx->qos_cfg.awqos_high);
-	if (ret) {
-		pr_warn("read awqos-high failed, use default\n");
-		ctx->qos_cfg.awqos_high = 0x7;
-	}
-
 
 	enhance = kzalloc(sizeof(*enhance), GFP_KERNEL);
 	if (!enhance)
@@ -1172,6 +1194,11 @@ static void dpu_enhance_backup(struct dpu_context *ctx, u32 id, void *param)
 		enhance->enhance_en &= ~(*p);
 		pr_info("enhance disable backup: 0x%x\n", *p);
 		break;
+	case ENHANCE_CFG_ID_SCL:
+		memcpy(&enhance->scale_copy, param, sizeof(enhance->scale_copy));
+		enhance->enhance_en |= BIT(0);
+		pr_info("enhance scaling backup\n");
+		break;
 	case ENHANCE_CFG_ID_HSV:
 		memcpy(&enhance->hsv_copy, param, sizeof(enhance->hsv_copy));
 		enhance->enhance_en |= BIT(2);
@@ -1214,6 +1241,7 @@ static void dpu_epf_set(struct dpu_context *ctx, struct epf_cfg *epf)
 static void dpu_enhance_set(struct dpu_context *ctx, u32 id, void *param)
 {
 	struct dpu_enhance *enhance = ctx->enhance;
+	struct scale_cfg *scale;
 	struct cm_cfg *cm;
 	struct slp_cfg *slp;
 	struct gamma_lut *gamma;
@@ -1238,6 +1266,13 @@ static void dpu_enhance_set(struct dpu_context *ctx, u32 id, void *param)
 		p = param;
 		DPU_REG_CLR(ctx->base + REG_DPU_ENHANCE_CFG, *p);
 		pr_info("enhance module disable: 0x%x\n", *p);
+		break;
+	case ENHANCE_CFG_ID_SCL:
+		memcpy(&enhance->scale_copy, param, sizeof(enhance->scale_copy));
+		scale = &enhance->scale_copy;
+		DPU_REG_WR(ctx->base + REG_BLEND_SIZE, (scale->in_h << 16) | scale->in_w);
+		DPU_REG_SET(ctx->base + REG_DPU_ENHANCE_CFG, BIT(0));
+		pr_info("enhance scaling: %ux%u\n", scale->in_w, scale->in_h);
 		break;
 	case ENHANCE_CFG_ID_HSV:
 		memcpy(&enhance->hsv_copy, param, sizeof(enhance->hsv_copy));
@@ -1312,6 +1347,7 @@ static void dpu_enhance_set(struct dpu_context *ctx, u32 id, void *param)
 
 static void dpu_enhance_get(struct dpu_context *ctx, u32 id, void *param)
 {
+	struct scale_cfg *scale;
 	struct epf_cfg *ep;
 	struct slp_cfg *slp;
 	struct gamma_lut *gamma;
@@ -1322,6 +1358,13 @@ static void dpu_enhance_get(struct dpu_context *ctx, u32 id, void *param)
 		p32 = param;
 		*p32 = DPU_REG_RD(ctx->base + REG_DPU_ENHANCE_CFG);
 		pr_info("enhance module enable get\n");
+		break;
+	case ENHANCE_CFG_ID_SCL:
+		scale = param;
+		val = DPU_REG_RD(ctx->base + REG_BLEND_SIZE);
+		scale->in_w = val & 0xffff;
+		scale->in_h = val >> 16;
+		pr_info("enhance scaling get\n");
 		break;
 	case ENHANCE_CFG_ID_EPF:
 		ep = param;
@@ -1406,12 +1449,20 @@ static void dpu_enhance_get(struct dpu_context *ctx, u32 id, void *param)
 static void dpu_enhance_reload(struct dpu_context *ctx)
 {
 	struct dpu_enhance *enhance = ctx->enhance;
+	struct scale_cfg *scale;
 	struct cm_cfg *cm;
 	struct slp_cfg *slp;
 	struct gamma_lut *gamma;
 	struct hsv_lut *hsv;
 	struct epf_cfg *epf;
 	int i;
+
+	if (enhance->enhance_en & BIT(0)) {
+		scale = &enhance->scale_copy;
+		DPU_REG_WR(ctx->base + REG_BLEND_SIZE, (scale->in_h << 16) | scale->in_w);
+		pr_info("enhance scaling from %ux%u to %ux%u\n", scale->in_w,
+			scale->in_h, ctx->vm.hactive, ctx->vm.vactive);
+	}
 
 	if (enhance->enhance_en & BIT(1)) {
 		epf = &enhance->epf_copy;
@@ -1472,18 +1523,18 @@ static void dpu_enhance_reload(struct dpu_context *ctx)
 static int dpu_modeset(struct dpu_context *ctx,
 		struct drm_display_mode *mode)
 {
-	struct scale_config_param *scale_cfg = &ctx->scale_cfg;
+	struct dpu_enhance *enhance = ctx->enhance;
 
-	scale_cfg->in_w = mode->hdisplay;
-	scale_cfg->in_h = mode->vdisplay;
+	enhance->scale_copy.in_w = mode->hdisplay;
+	enhance->scale_copy.in_h = mode->vdisplay;
 
 	if ((mode->hdisplay != ctx->vm.hactive) ||
-	    (mode->vdisplay != ctx->vm.vactive))
-		scale_cfg->need_scale = true;
+		(mode->vdisplay != ctx->vm.vactive))
+		enhance->need_scale = true;
 	else
-		scale_cfg->need_scale = false;
+		enhance->need_scale = false;
 
-	scale_cfg->sr_mode_changed = true;
+	enhance->mode_changed = true;
 	pr_info("begin switch to %u x %u\n", mode->hdisplay, mode->vdisplay);
 
 	return 0;
@@ -1491,6 +1542,7 @@ static int dpu_modeset(struct dpu_context *ctx,
 
 const struct dpu_core_ops dpu_lite_r2p0_core_ops = {
 	.version = dpu_version,
+	.parse_dt = dpu_parse_dt,
 	.init = dpu_init,
 	.fini = dpu_fini,
 	.run = dpu_run,
@@ -1503,7 +1555,7 @@ const struct dpu_core_ops dpu_lite_r2p0_core_ops = {
 	.enable_vsync = enable_vsync,
 	.disable_vsync = disable_vsync,
 	.context_init = dpu_context_init,
-	.write_back = dpu_write_back,
+	// .write_back = dpu_write_back,
 	.check_raw_int = dpu_check_raw_int,
 	.enhance_set = dpu_enhance_set,
 	.enhance_get = dpu_enhance_get,

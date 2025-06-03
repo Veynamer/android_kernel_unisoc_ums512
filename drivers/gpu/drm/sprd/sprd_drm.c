@@ -4,13 +4,16 @@
  */
 
 #include <linux/component.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
+#include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of_graph.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
 #include <uapi/drm/sprd_drm_gsp.h>
+#include <uapi/linux/sched/types.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
@@ -113,43 +116,6 @@ int sprd_atomic_wait_for_fences(struct drm_device *dev,
 	return 0;
 }
 
-static int sprd_atomic_wait_last_cleanup_done(struct drm_device *drm,
-						struct drm_atomic_state *state)
-{
-	struct drm_crtc *crtc;
-	struct drm_crtc_commit *commit, *last_commit = NULL;
-	int i, ret;
-
-	drm_for_each_crtc(crtc, drm) {
-		i = 0;
-		last_commit = NULL;
-		spin_lock(&crtc->commit_lock);
-		list_for_each_entry(commit, &crtc->commit_list, commit_entry) {
-			if (i == 1) {
-				last_commit = drm_crtc_commit_get(commit);
-				break;
-			}
-
-			i++;
-		}
-
-		spin_unlock(&crtc->commit_lock);
-		if (!last_commit)
-			continue;
-
-		ret = wait_for_completion_interruptible(&last_commit->cleanup_done);
-
-		drm_crtc_commit_put(last_commit);
-		if (ret) {
-			DRM_ERROR("[CRTC:%d:%s] wait last commit cleanup_done timed out\n",
-				   crtc->base.id, crtc->name);
-			return ret;
-		}
-	}
-
-	return 0;
-}
-
 static void sprd_commit_tail(struct drm_atomic_state *old_state)
 {
 	struct drm_device *dev = old_state->dev;
@@ -174,18 +140,19 @@ static void sprd_commit_tail(struct drm_atomic_state *old_state)
 	drm_atomic_state_put(old_state);
 }
 
-static void sprd_commit_work(struct work_struct *work)
+static void sprd_commit_work(struct kthread_work *work)
 {
-	struct drm_atomic_state *state = container_of(work,
-						      struct drm_atomic_state,
-						      commit_work);
-	sprd_commit_tail(state);
+	struct sprd_drm *sprd = container_of(work,
+					 struct sprd_drm,
+					 commit_kwork);
+	sprd_commit_tail(sprd->state);
 }
 
 int sprd_atomic_helper_commit(struct drm_device *dev,
 			struct drm_atomic_state *state, bool nonblock)
 {
 	int ret;
+	struct sprd_drm *sprd = dev->dev_private;
 
 	/*
 	 * FIXME:
@@ -202,8 +169,6 @@ int sprd_atomic_helper_commit(struct drm_device *dev,
 	if (ret)
 		return ret;
 
-	INIT_WORK(&state->commit_work, sprd_commit_work);
-
 	ret = drm_atomic_helper_prepare_planes(dev, state);
 	if (ret)
 		return ret;
@@ -212,23 +177,10 @@ int sprd_atomic_helper_commit(struct drm_device *dev,
 	if (ret)
 		goto err;
 
-	/*
-	 * FIXME:
-	 * Because of system heave loads or other performance issues, the procedure which after
-	 * swap state the most recent commit may running ahead of the last commit.
-	 * When the most recent commit finish drm atomic commit procedure, it will free last time's
-	 * commit state which stored as old state in the most recent commit's drm_atomic_state.
-	 * If last commit has not finished yet, calling on variable may causing stability problem.
-	 * So we add this restriction to force the most recent commit waiting for the last on clean
-	 * up done completed to avoid the problem declared above.
-	 */
-	ret = sprd_atomic_wait_last_cleanup_done(dev, state);
-	if (ret)
-		goto err;
-
 	drm_atomic_state_get(state);
+	sprd->state = state;
 	if (nonblock)
-		queue_work(system_unbound_wq, &state->commit_work);
+		kthread_queue_work(&sprd->commit_kworker, &sprd->commit_kwork);
 	else
 		sprd_commit_tail(state);
 
@@ -253,7 +205,7 @@ static void sprd_drm_mode_config_init(struct drm_device *drm)
 	drm->mode_config.min_height = 0;
 	drm->mode_config.max_width = 8192;
 	drm->mode_config.max_height = 8192;
-	drm->mode_config.allow_fb_modifiers = false;
+	drm->mode_config.allow_fb_modifiers = true;
 
 	drm->mode_config.funcs = &sprd_drm_mode_config_funcs;
 }
@@ -311,6 +263,7 @@ static int sprd_drm_bind(struct device *dev)
 	struct drm_device *drm;
 	struct sprd_drm *sprd;
 	int err;
+	struct sched_param param = { .sched_priority = 1 };
 
 	DRM_INFO("%s()\n", __func__);
 
@@ -364,6 +317,23 @@ static int sprd_drm_bind(struct device *dev)
 	if (err < 0)
 		goto err_kms_helper_poll_fini;
 
+	/* initialize kworker & kwork and create kthread */
+	kthread_init_worker(&sprd->commit_kworker);
+
+	kthread_init_work(&sprd->commit_kwork, sprd_commit_work);
+
+	sprd->commit_thread = kthread_run(kthread_worker_fn, &sprd->commit_kworker,
+			   "sprd_drm_commit_worker_thread");
+
+	if (IS_ERR(sprd->commit_thread)) {
+		sprd->commit_thread = NULL;
+		DRM_ERROR("%s: failed to run config posting thread: \n",
+				__func__);
+		return 0;
+	}
+
+	sched_setscheduler(sprd->commit_thread, SCHED_FIFO, &param);
+
 	return 0;
 
 err_kms_helper_poll_fini:
@@ -381,6 +351,12 @@ err_free_drm:
 static void sprd_drm_unbind(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
+	struct sprd_drm *sprd = drm->dev_private;
+
+	if (sprd->commit_thread) {
+		kthread_flush_worker(&sprd->commit_kworker);
+		kthread_stop(sprd->commit_thread);
+	}
 
 	DRM_INFO("%s()\n", __func__);
 
@@ -496,13 +472,6 @@ static int sprd_drm_component_probe(struct device *dev,
 static int sprd_drm_probe(struct platform_device *pdev)
 {
 	int ret;
-	bool cali_mode;
-
-	cali_mode = boot_mode_check("androidboot.mode=cali");
-	if (cali_mode) {
-		DRM_WARN("Calibration Mode! Don't register sprd drm driver");
-		return 0;
-	}
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, ~0);
 	if (ret) {
@@ -571,10 +540,8 @@ static int sprd_drm_pm_suspend(struct device *dev)
 				is_suspend = true; /* For BBAT deep sleep */
 				return 0;
 			}
-			is_suspend = true; /* For BBAT display test */
-			DRM_INFO("Only support crtc0  power down\n");
-			break;
 		}
+		is_suspend = true; /* For BBAT display test */
 	}
 
 	drm_kms_helper_poll_disable(drm);

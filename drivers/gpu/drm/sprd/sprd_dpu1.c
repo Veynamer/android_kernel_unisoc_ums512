@@ -77,7 +77,7 @@ static void sprd_dpu_mode_set_nofb(struct sprd_crtc *crtc)
 	struct sprd_dpu *dpu = crtc->priv;
 	struct drm_display_mode *mode = &crtc->base.state->adjusted_mode;
 
-	DRM_INFO("%s() set mode: %s\n", __func__, mode->name);
+	DRM_INFO("%s() set mode: %s\n", __func__, dpu->mode->name);
 
 	if (dpu->core->modeset && crtc->base.state->mode_changed)
 		dpu->core->modeset(&dpu->ctx, mode);
@@ -312,7 +312,10 @@ static irqreturn_t sprd_dpu_isr(int irq, void *data)
 	int_mask = dpu->core->isr(ctx);
 
 	if (int_mask & BIT_DPU_INT_ERR)
-		DRM_WARN("Warning: dpu1 underflow!\n");
+		DRM_WARN("Warning: dpu underflow!\n");
+
+	if ((int_mask & BIT_DPU_INT_VSYNC) && ctx->enabled)
+		drm_crtc_handle_vblank(&dpu->crtc->base);
 
 	return IRQ_HANDLED;
 }
@@ -366,8 +369,6 @@ static int sprd_dpu_bind(struct device *dev, struct device *master, void *data)
 
 	sprd_dpu_irq_request(dpu);
 
-	pm_runtime_enable(dev);
-
 	return 0;
 }
 
@@ -413,8 +414,11 @@ static int sprd_dpu_context_init(struct sprd_dpu *dpu,
 	struct dpu_context *ctx = &dpu->ctx;
 	int ret;
 
-	if (dpu->core->context_init) {
-		ret = dpu->core->context_init(ctx, np);
+	if (dpu->core->context_init)
+		dpu->core->context_init(ctx);
+
+	if (dpu->core->parse_dt) {
+		ret = dpu->core->parse_dt(ctx, np);
 		if (ret)
 			return ret;
 	}
@@ -423,11 +427,6 @@ static int sprd_dpu_context_init(struct sprd_dpu *dpu,
 		dpu->clk->parse_dt(ctx, np);
 	if (dpu->glb->parse_dt)
 		dpu->glb->parse_dt(ctx, np);
-
-	if (of_property_read_bool(np, "sprd,initial-stop-state")) {
-		DRM_WARN("DPU is not initialized before entering kernel\n");
-		dpu->ctx.stopped = true;
-	}
 
 	if (of_address_to_resource(np, 0, &r)) {
 		DRM_ERROR("parse dt base address failed\n");
@@ -494,6 +493,10 @@ static int sprd_dpu_probe(struct platform_device *pdev)
 		return ret;
 
 	platform_set_drvdata(pdev, dpu);
+
+	pm_runtime_set_active(&pdev->dev);
+	pm_runtime_get_noresume(&pdev->dev);
+	pm_runtime_enable(&pdev->dev);
 
 	return component_add(&pdev->dev, &dpu_component_ops);
 }

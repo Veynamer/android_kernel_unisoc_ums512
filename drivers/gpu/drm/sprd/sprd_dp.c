@@ -4,7 +4,6 @@
  */
 
 #include <linux/component.h>
-#include <linux/extcon.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
@@ -32,10 +31,17 @@
 #define connector_to_dp(connector) \
 	container_of(connector, struct sprd_dp, connector)
 
-/*
-#define drm_connector_update_edid_property(connector, edid) \
-	drm_mode_connector_update_edid_property(connector, edid)
-*/
+//#define drm_connector_update_edid_property(connector, edid) \
+//	drm_mode_connector_update_edid_property(connector, edid)
+
+LIST_HEAD(dp_glb_head);
+
+BLOCKING_NOTIFIER_HEAD(sprd_dp_notifier_list);
+
+int sprd_dp_notifier_call_chain(void *data)
+{
+	return blocking_notifier_call_chain(&sprd_dp_notifier_list, 0, data);
+}
 
 static int sprd_dp_resume(struct sprd_dp *dp)
 {
@@ -55,44 +61,37 @@ static int sprd_dp_suspend(struct sprd_dp *dp)
 	return 0;
 }
 
-static int sprd_dp_detect(struct sprd_dp *dp, int hpd_status)
+static int sprd_dp_detect(struct sprd_dp *dp, int enable)
 {
 	if (dp->glb && dp->glb->detect)
-		dp->glb->detect(&dp->ctx, hpd_status);
+		dp->glb->detect(&dp->ctx, enable);
 
 	DRM_INFO("dp detect\n");
 	return 0;
 }
 
-static int sprd_dp_pd_event(struct notifier_block *nb,
+static int sprd_dp_notify_callback(struct notifier_block *nb,
 			unsigned long action, void *data)
 {
 	struct sprd_dp *dp = container_of(nb, struct sprd_dp, dp_nb);
-	struct extcon_dev *edev = dp->snps_dptx->edev;
-	union extcon_property_value property;
+	enum sprd_dp_hpd_status *hpd_status = data;
 
-	extcon_get_property(edev, EXTCON_DISP_DP,
-				EXTCON_PROP_DISP_HPD, &property);
-
-	if (dp->hpd_status == false &&
-		property.intval ==  DP_HOT_PLUG) {
+	if (*hpd_status ==  DP_HOT_PLUG &&
+		dp->hpd_status == false) {
 		pm_runtime_get_sync(dp->dev.parent);
 		sprd_dp_resume(dp);
-		sprd_dp_detect(dp, DP_HOT_PLUG);
+		sprd_dp_detect(dp, 1);
 		dp->hpd_status = true;
 	} else if (dp->hpd_status == true &&
-		(property.intval ==  DP_HOT_UNPLUG ||
-		property.intval == DP_TYPE_DISCONNECT)) {
-		sprd_dp_detect(dp, DP_HOT_UNPLUG);
+		(*hpd_status ==  DP_HOT_UNPLUG ||
+		*hpd_status == DP_TYPE_DISCONNECT)) {
+		sprd_dp_detect(dp, 0);
 		sprd_dp_suspend(dp);
 		pm_runtime_put(dp->dev.parent);
 		dp->hpd_status = false;
-	} else if (dp->hpd_status == true &&
-		property.intval ==  DP_HPD_IRQ) {
-		sprd_dp_detect(dp, DP_HPD_IRQ);
 	}
 
-	DRM_INFO("%s() hpd_status:%d\n", __func__, property.intval);
+	DRM_INFO("%s() hpd_status:%d\n", __func__, *hpd_status);
 	return NOTIFY_OK;
 }
 
@@ -154,8 +153,6 @@ static void sprd_dp_encoder_disable(struct drm_encoder *encoder)
 	}
 
 	sprd_dpu1_stop(crtc->priv);
-
-	dptx_disable_default_video_stream(dp->snps_dptx, 0);
 
 	sprd_dp_suspend(dp);
 
@@ -468,8 +465,6 @@ static int sprd_dp_bind(struct device *dev, struct device *master, void *data)
 	struct drm_device *drm = data;
 	struct sprd_dp *dp = dev_get_drvdata(dev);
 	struct video_params *vparams = NULL;
-	struct device_node *np = dev->of_node;
-	struct extcon_dev *extcon;
 	int ret;
 
 	ret = sprd_dp_encoder_init(drm, dp);
@@ -490,27 +485,14 @@ static int sprd_dp_bind(struct device *dev, struct device *master, void *data)
 		goto cleanup_connector;
 	}
 
-	if (of_property_read_bool(np, "extcon")) {
-		extcon = extcon_get_edev_by_phandle(dev, 0);
-		if (IS_ERR_OR_NULL(extcon)) {
-			DRM_ERROR("failed to find pd extcon device\n");
-			return -EPROBE_DEFER;
-		}
-		dp->snps_dptx->edev = extcon;
-	} else
-		DRM_ERROR("failed to find extcon nodes");
-
 	sprd_dp_suspend(dp);
 	pm_runtime_put(dev);
 
 	vparams = &dp->snps_dptx->vparams;
 
-	dp->dp_nb.notifier_call = sprd_dp_pd_event;
-	ret = devm_extcon_register_notifier(&dp->dev, dp->snps_dptx->edev,
-						EXTCON_DISP_DP,
+	dp->dp_nb.notifier_call = sprd_dp_notify_callback;
+	blocking_notifier_chain_register(&sprd_dp_notifier_list,
 						&dp->dp_nb);
-	if (ret)
-		DRM_ERROR("register EXTCON_DISP_DP notifier err\n");
 
 	return 0;
 
@@ -589,7 +571,6 @@ static const struct of_device_id dp_match_table[] = {
 static int sprd_dp_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
-	const struct sprd_dp_ops *pdata;
 	struct sprd_dp *dp;
 	//const char *str;
 	int ret;
@@ -600,14 +581,6 @@ static int sprd_dp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
-	pdata = of_device_get_match_data(&pdev->dev);
-	if (pdata) {
-		dp->glb = pdata->glb;
-	} else {
-		DRM_ERROR("No matching driver data found\n");
-		return -EINVAL;
-	}
-
 	ret = sprd_dp_context_init(dp, np);
 	if (ret)
 		return ret;
@@ -615,7 +588,7 @@ static int sprd_dp_probe(struct platform_device *pdev)
 	sprd_dp_device_create(dp, &pdev->dev);
 	platform_set_drvdata(pdev, dp);
 
-	sprd_dp_audio_codec_init(&pdev->dev);
+	//sprd_dp_audio_codec_init(&pdev->dev);
 
 	return component_add(&pdev->dev, &dp_component_ops);
 }

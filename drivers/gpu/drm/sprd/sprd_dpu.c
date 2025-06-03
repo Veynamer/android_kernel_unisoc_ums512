@@ -22,7 +22,6 @@
 #include <drm/drm_plane_helper.h>
 #include <drm/drm_vblank.h>
 
-#include "sprd_dsc.h"
 #include "sprd_crtc.h"
 #include "sprd_dpu.h"
 #include "sprd_drm.h"
@@ -31,7 +30,7 @@
 #include "sysfs/sysfs_display.h"
 
 static void sprd_dpu_enable(struct sprd_dpu *dpu);
-void sprd_dpu_disable(struct sprd_dpu *dpu);
+static void sprd_dpu_disable(struct sprd_dpu *dpu);
 
 static void sprd_dpu_prepare_fb(struct sprd_crtc *crtc,
 				struct drm_plane_state *new_state)
@@ -122,10 +121,21 @@ static void sprd_dpu_mode_set_nofb(struct sprd_crtc *crtc)
 
 	DRM_INFO("%s() set mode: %s\n", __func__, dpu->mode->name);
 
-	if (dpu->dsi->ctx.work_mode == DSI_MODE_VIDEO)
+	/*
+	 * TODO:
+	 * Currently, low simulator resolution only support
+	 * DPI mode, support for EDPI in the future.
+	 */
+	if (mode->type & DRM_MODE_TYPE_USERDEF) {
 		dpu->ctx.if_type = SPRD_DPU_IF_DPI;
-	else
+		return;
+	}
+
+	if ((dpu->mode->hdisplay == dpu->mode->htotal) ||
+	    (dpu->mode->vdisplay == dpu->mode->vtotal))
 		dpu->ctx.if_type = SPRD_DPU_IF_EDPI;
+	else
+		dpu->ctx.if_type = SPRD_DPU_IF_DPI;
 
 	if (dpu->core->modeset && crtc->base.state->mode_changed)
 		dpu->core->modeset(&dpu->ctx, mode);
@@ -158,22 +168,16 @@ static void sprd_dpu_atomic_enable(struct sprd_crtc *crtc)
 	static bool is_enable = true;
 
 	DRM_INFO("%s()\n", __func__);
-	if (is_enable) {
-		/* workaround:
-		 * dpu r6p0 need resume after dsi resume on div6 scences
-		 * for dsi core and dpi clk depends on dphy clk
-		 */
-		if (!strcmp(dpu->ctx.version, "dpu-r6p0")) {
-			sprd_dpu_resume(dpu);
-		}
+	if (is_enable)
 		is_enable = false;
-	}
 	else
 		pm_runtime_get_sync(dpu->dev.parent);
 
-	if (strcmp(dpu->ctx.version, "dpu-r6p0")) {
-		sprd_dpu_resume(dpu);
-	}
+	sprd_dpu_enable(dpu);
+
+	enable_irq(dpu->ctx.irq);
+
+	sprd_iommu_restore(&dpu->dev);
 }
 
 static void sprd_dpu_atomic_disable(struct sprd_crtc *crtc)
@@ -199,16 +203,11 @@ void sprd_dpu_atomic_disable_force(struct drm_crtc *crtc)
 	DRM_INFO("%s()\n", __func__);
 
 	/* dpu is not initialized,it should enable first! */
-	if (!dpu->ctx.enabled) {
-		sprd_dpu_enable(dpu);
-		enable_irq(dpu->ctx.irq);
-	} else
-		return;
+	sprd_dpu_enable(dpu);
+	enable_irq(dpu->ctx.irq);
 
-	if (strcmp(dpu->ctx.version, "dpu-r6p0")) {
-		disable_irq(dpu->ctx.irq);
-		sprd_dpu_disable(dpu);
-	}
+	disable_irq(dpu->ctx.irq);
+	sprd_dpu_disable(dpu);
 }
 
 static void sprd_dpu_atomic_begin(struct sprd_crtc *crtc)
@@ -293,6 +292,7 @@ void sprd_dpu_run(struct sprd_dpu *dpu)
 	up(&ctx->lock);
 
 	drm_crtc_vblank_on(&dpu->crtc->base);
+	mdelay(50);
 }
 
 void sprd_dpu_stop(struct sprd_dpu *dpu)
@@ -355,15 +355,7 @@ static void sprd_dpu_enable(struct sprd_dpu *dpu)
 	up(&ctx->lock);
 }
 
-void sprd_dpu_resume(struct sprd_dpu *dpu)
-{
-	sprd_dpu_enable(dpu);
-	enable_irq(dpu->ctx.irq);
-	sprd_iommu_restore(&dpu->dev);
-	DRM_INFO("dpu resume OK\n");
-}
-
-void sprd_dpu_disable(struct sprd_dpu *dpu)
+static void sprd_dpu_disable(struct sprd_dpu *dpu)
 {
 	struct dpu_context *ctx = &dpu->ctx;
 
@@ -408,6 +400,9 @@ static irqreturn_t sprd_dpu_isr(int irq, void *data)
 
 	if (int_mask & BIT_DPU_INT_ERR)
 		DRM_WARN("Warning: dpu underflow!\n");
+
+	if (int_mask & BIT_DPU_INT_VSYNC)
+		drm_crtc_handle_vblank(&dpu->crtc->base);
 
 	return IRQ_HANDLED;
 }
@@ -556,8 +551,11 @@ static int sprd_dpu_context_init(struct sprd_dpu *dpu,
 	struct dpu_context *ctx = &dpu->ctx;
 	int ret;
 
-	if (dpu->core->context_init) {
-		ret = dpu->core->context_init(ctx, np);
+	if (dpu->core->context_init)
+		dpu->core->context_init(ctx);
+
+	if (dpu->core->parse_dt) {
+		ret = dpu->core->parse_dt(ctx, np);
 		if (ret)
 			return ret;
 	}
@@ -585,7 +583,6 @@ static int sprd_dpu_context_init(struct sprd_dpu *dpu,
 
 	ctx->panel_ready = true;
 	ctx->time = 5000;
-	ctx->secure_debug = false;
 
 	init_waitqueue_head(&dpu->ctx.te_wq);
 
@@ -652,6 +649,26 @@ static const struct of_device_id dpu_match_table[] = {
 	{ /* sentinel */ },
 };
 
+static int boot_mode_check(void)
+{
+	struct device_node *np;
+	const char *cmd_line;
+	int ret = 0;
+
+	np = of_find_node_by_path("/chosen");
+	if (!np)
+		return 0;
+
+	ret = of_property_read_string(np, "bootargs", &cmd_line);
+	if (ret < 0)
+		return 0;
+
+	if (strstr(cmd_line, "androidboot.mode=cali"))
+		ret = 1;
+
+	return ret;
+}
+
 static int sprd_dpu_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -662,7 +679,12 @@ static int sprd_dpu_probe(struct platform_device *pdev)
 	dpu = devm_kzalloc(&pdev->dev, sizeof(*dpu), GFP_KERNEL);
 	if (!dpu)
 		return -ENOMEM;
-
+		
+	if (boot_mode_check()) {
+		printk("Calibration Mode! Don't register sprd_dpu_probe");
+		return 0;
+	}
+	
 	pdata = of_device_get_match_data(&pdev->dev);
 	if (pdata) {
 		dpu->core = pdata->core;

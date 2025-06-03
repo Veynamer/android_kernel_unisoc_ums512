@@ -17,13 +17,13 @@
 #include "sprd_gem.h"
 
 #define to_sprd_crtc(x)			container_of(x, struct sprd_crtc, base)
-#define to_sprd_crtc_state(x)		container_of(x, struct sprd_crtc_state, base)
 
 #define BIT_DPU_INT_DONE_		BIT(0)
 #define BIT_DPU_INT_TE			BIT(1)
 #define BIT_DPU_INT_ERR			BIT(2)
 #define BIT_DPU_INT_EDPI_TE		BIT(3)
 #define BIT_DPU_INT_UPDATE_DONE		BIT(4)
+#define BIT_DPU_INT_VSYNC		BIT(5)
 #define BIT_DPU_INT_WB_DONE		BIT(6)
 #define BIT_DPU_INT_WB_ERR		BIT(7)
 
@@ -43,12 +43,6 @@ struct sprd_crtc_capability {
 	u32 fmts_cnt;
 };
 
-struct sprd_crtc_state {
-	struct drm_crtc_state base;
-	bool resolution_change;
-	bool frame_rate_change;
-};
-
 struct sprd_crtc {
 	struct drm_crtc base;
 	enum sprd_crtc_output_type type;
@@ -56,10 +50,6 @@ struct sprd_crtc {
 	struct sprd_plane *planes;
 	u8 pending_planes;
 	void *priv;
-	bool fps_mode_changed;
-	bool sr_mode_changed;
-	struct drm_property *resolution_property;
-	struct drm_property *frame_rate_property;
 };
 
 struct sprd_crtc_ops {

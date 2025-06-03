@@ -113,7 +113,6 @@ struct dptx {
 	struct drm_device *drm_dev;
 	struct drm_connector connector;
 	struct extcon_dev *edev;
-	struct extcon_dev *hdmi_edev;
 	struct drm_bridge *bridge;
 	struct drm_dp_aux aux_dev;
 	struct dptx_aux aux;
@@ -236,6 +235,6 @@ void dptx_audio_timestamp_sdp_en(struct dptx *dptx);
 
 int handle_automated_test_request(struct dptx *dptx);
 
-void dptx_en_dis_hdcp13(struct dptx *dptx, u8 enable);
+//void dptx_en_dis_hdcp13(struct dptx *dptx, u8 enable);
 
 #endif

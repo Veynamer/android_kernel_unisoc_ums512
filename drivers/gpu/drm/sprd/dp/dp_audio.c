@@ -4,7 +4,6 @@
  * Copyright (C) 2020 Unisoc Inc.
  */
 
-#include <linux/platform_device.h>
 #include <sound/sprd-dp-codec.h>
 #include "dw_dptx.h"
 #include "sprd_dp.h"
