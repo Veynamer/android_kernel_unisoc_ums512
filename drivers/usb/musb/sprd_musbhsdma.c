@@ -685,7 +685,7 @@ static int sprd_dma_channel_program(struct dma_channel *channel,
 				      MUSB_RXCSR_DMAENAB;
 			csr = musb_readw(epio, MUSB_RXCSR);
 			if ((csr & dma_setting) != dma_setting)
-				musb_writew(epio, MUSB_RXCSR, dma_setting | csr);
+				musb_writew(epio, MUSB_RXCSR, dma_setting);
 		} else {
 			dma_setting = MUSB_TXCSR_AUTOSET |
 				      MUSB_TXCSR_DMAMODE |
@@ -726,18 +726,23 @@ static void musb_host_channel_abort(struct musb *musb,
 {
 	struct urb *urb;
 	struct musb_qh *qh;
-	struct musb_hw_ep *hw_ep = &musb->endpoints[musb_channel->ep_num];
-	struct dma_channel *channel = &musb_channel->channel;
+	struct musb_hw_ep *hw_ep;
+	struct musb_ep *musb_ep;
+	struct dma_channel *channel;
 
-	if (musb_channel->transmit)
+	if (musb_channel->transmit) {
+		musb_ep = &musb->endpoints[musb_channel->ep_num].ep_out;
+		hw_ep = musb_ep->hw_ep;
 		qh = hw_ep->out_qh;
-	else
+	} else {
+		musb_ep = &musb->endpoints[musb_channel->ep_num].ep_in;
+		hw_ep = musb_ep->hw_ep;
 		qh = hw_ep->in_qh;
-
+	}
 	if (qh) {
 		urb = next_urb(qh);
-		if (urb)
-			urb->status = -ECONNRESET;
+		urb->status = -ECONNRESET;
+		channel = &musb_channel->channel;
 		if (list_empty(&qh->hep->urb_list))
 			channel->status = MUSB_DMA_STATUS_FREE;
 	}
