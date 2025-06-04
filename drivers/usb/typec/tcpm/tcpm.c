@@ -1881,8 +1881,7 @@ static void tcpm_pd_ctrl_request(struct tcpm_port *port,
 		switch (port->state) {
 		case SRC_READY:
 		case SNK_READY:
-			/* Currently not supported */
-			tcpm_queue_message(port, PD_MSG_CTRL_REJECT);
+			tcpm_set_state(port, VCONN_SWAP_ACCEPT, 0);
 			break;
 		default:
 			tcpm_queue_message(port, PD_MSG_CTRL_WAIT);

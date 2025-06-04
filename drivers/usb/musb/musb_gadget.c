@@ -133,6 +133,7 @@ __acquires(ep->musb->lock)
 {
 	struct musb_request	*req;
 	struct musb		*musb;
+	int			busy = ep->busy;
 
 	req = to_musb_request(request);
 
@@ -141,6 +142,7 @@ __acquires(ep->musb->lock)
 		req->request.status = status;
 	musb = req->musb;
 
+	ep->busy = 1;
 	spin_unlock(&musb->lock);
 
 	if (!dma_mapping_error(&musb->g.dev, request->dma))
@@ -149,6 +151,7 @@ __acquires(ep->musb->lock)
 	trace_musb_req_gb(req);
 	usb_gadget_giveback_request(&req->ep->end_point, &req->request);
 	spin_lock(&musb->lock);
+	ep->busy = busy;
 }
 
 /* ----------------------------------------------------------------------- */
@@ -162,7 +165,6 @@ static void nuke(struct musb_ep *ep, const int status)
 	struct musb		*musb = ep->musb;
 	struct musb_request	*req = NULL;
 	void __iomem *epio = ep->musb->endpoints[ep->current_epnum].regs;
-	u32 hsbt;
 
 	ep->busy = 1;
 
@@ -171,10 +173,6 @@ static void nuke(struct musb_ep *ep, const int status)
 		int value;
 
 		if (ep->is_in) {
-			hsbt = musb_readl(musb->mregs, MUSB_C_T_HSBT);
-			hsbt |= MUSB_CLEAR_TXBUFF_EN;
-			musb_writel(musb->mregs, MUSB_C_T_HSBT, hsbt);
-
 			/*
 			 * The programming guide says that we must not clear
 			 * the DMAMODE bit before DMAENAB, so we only
@@ -185,10 +183,6 @@ static void nuke(struct musb_ep *ep, const int status)
 			musb_writew(epio, MUSB_TXCSR,
 					0 | MUSB_TXCSR_FLUSHFIFO);
 		} else {
-			hsbt = musb_readl(musb->mregs, MUSB_C_T_HSBT);
-			hsbt |= MUSB_CLEAR_RXBUFF_EN;
-			musb_writel(musb->mregs, MUSB_C_T_HSBT, hsbt);
-
 			musb_writew(epio, MUSB_RXCSR,
 					0 | MUSB_RXCSR_FLUSHFIFO);
 			musb_writew(epio, MUSB_RXCSR,
@@ -928,8 +922,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 	u16		csr;
 	unsigned	tmp;
 	int		status = -EINVAL;
-	u8 flushcnt = 0;
-	u32 hsbt;
 
 	if (!ep || !desc)
 		return -EINVAL;
@@ -940,11 +932,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 	musb = musb_ep->musb;
 	mbase = musb->mregs;
 	epnum = musb_ep->current_epnum;
-
-	if (pm_runtime_suspended(musb->controller)) {
-		dev_err(musb->controller, "%s controller suspended\n", __func__);
-		return status;
-	}
 
 	spin_lock_irqsave(&musb->lock, flags);
 
@@ -996,10 +983,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 			goto fail;
 		}
 
-		hsbt = musb_readl(mbase, MUSB_C_T_HSBT);
-		hsbt |= MUSB_CLEAR_TXBUFF_EN;
-		musb_writel(mbase, MUSB_C_T_HSBT, hsbt);
-
 		musb->intrtxe |= (1 << epnum);
 		musb_writew(mbase, MUSB_INTRTXE, musb->intrtxe);
 
@@ -1039,10 +1022,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 			goto fail;
 		}
 
-		hsbt = musb_readl(mbase, MUSB_C_T_HSBT);
-		hsbt |= MUSB_CLEAR_RXBUFF_EN;
-		musb_writel(mbase, MUSB_C_T_HSBT, hsbt);
-
 		musb->intrrxe |= (1 << epnum);
 		musb_writew(mbase, MUSB_INTRRXE, musb->intrrxe);
 
@@ -1071,15 +1050,6 @@ static int musb_gadget_enable(struct usb_ep *ep,
 		/* set twice in case of double buffering */
 		musb_writew(regs, MUSB_RXCSR, csr);
 		musb_writew(regs, MUSB_RXCSR, csr);
-		/* workround, sometimes we can't flush fifo by only two times. */
-		while (musb_readw(regs, MUSB_RXCSR) & MUSB_RXCSR_RXPKTRDY) {
-			flushcnt++;
-			if (flushcnt > 20) {
-				dev_err(musb->controller, "fifo cannot be flushed in 20 times!\n");
-				break;
-			}
-			musb_writew(regs, MUSB_RXCSR, csr);
-		}
 	}
 
 	/* NOTE:  all the I/O code _should_ work fine without DMA, in case
@@ -1131,19 +1101,12 @@ static int musb_gadget_disable(struct usb_ep *ep)
 	epnum = musb_ep->current_epnum;
 	epio = musb->endpoints[epnum].regs;
 
-	spin_lock_irqsave(&musb->lock, flags);
-	if (!musb_ep->desc) {
-		dev_err(musb->controller, "%s already disabled\n", ep->name);
-		spin_unlock_irqrestore(&musb->lock, flags);
-		return 0;
-	}
-
 	if (pm_runtime_suspended(dev)) {
-		spin_unlock_irqrestore(&musb->lock, flags);
 		WARN(1, "cann't access musb in suspended\n");
 		return -EINVAL;
 	}
 
+	spin_lock_irqsave(&musb->lock, flags);
 	musb_ep_select(musb->mregs, epnum);
 
 	/* zero the endpoint sizes */
@@ -1349,21 +1312,15 @@ static int musb_gadget_dequeue(struct usb_ep *ep, struct usb_request *request)
 	if (!ep || !request || req->ep != musb_ep)
 		return -EINVAL;
 
-	spin_lock_irqsave(&musb->lock, flags);
-	if (!musb_ep->desc) {
-		dev_err(musb->controller, "request %p queued to %s already disabled\n",
-				request, ep->name);
-		status = 0;
-		goto done;
-	}
-
 	if (pm_runtime_suspended(dev)) {
 		WARN(1, "cann't access musb in suspended\n");
-		status = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
 	trace_musb_req_deq(req);
+
+	spin_lock_irqsave(&musb->lock, flags);
+
 	if (list_empty(&musb_ep->req_list) && musb_ep->dma) {
 		struct dma_controller	*c = musb->dma_controller;
 
@@ -1392,28 +1349,46 @@ static int musb_gadget_dequeue(struct usb_ep *ep, struct usb_request *request)
 				break;
 		}
 
-		/* If found in dma reqlist, then stop dma transfer*/
 		if (r == req) {
-			struct dma_controller	*c = musb->dma_controller;
-
-			musb_ep_select(musb->mregs, musb_ep->current_epnum);
-			if (c->channel_abort)
-				status = c->channel_abort(musb_ep->dma);
-			else
-				status = -EBUSY;
-			/* musb_g_giveback will be called in channel_abort*/
-
 			dev_info(musb->controller, "request %p queued to %s startlist\n",
 				request, ep->name);
+			status = 0;
 		} else {
 			dev_err(musb->controller, "request %p queued to %s already processed\n",
 				request, ep->name);
 			status = -EINVAL;
 		}
-	} else {
+		goto done;
+	}
+
+	/* if the hardware doesn't have the request, easy ... */
+	if (musb_ep->req_list.next != &req->list || musb_ep->busy)
 		musb_g_giveback(musb_ep, request, -ECONNRESET);
-		dev_info(musb->controller, "request %p queued to %s giveback\n",
-				request, ep->name);
+
+	/* ... else abort the dma transfer ... */
+	else if (is_dma_capable() && musb_ep->dma) {
+		struct dma_controller	*c = musb->dma_controller;
+
+		musb_ep_select(musb->mregs, musb_ep->current_epnum);
+		if (c->channel_abort)
+			status = c->channel_abort(musb_ep->dma);
+		else
+			status = -EBUSY;
+
+		list_for_each_entry(r, &musb_ep->req_list, list) {
+			if (r == req) {
+				/* if the request is still in req_list
+				 * after channel_abort, give it back.
+				 */
+				musb_g_giveback(musb_ep, request, -ECONNRESET);
+				break;
+			}
+		}
+	} else {
+		/* NOTE: by sticking to easily tested hardware/driver states,
+		 * we leave counting of in-flight packets imprecise.
+		 */
+		musb_g_giveback(musb_ep, request, -ECONNRESET);
 	}
 
 done:
@@ -1561,7 +1536,6 @@ static void musb_gadget_fifo_flush(struct usb_ep *ep)
 	void __iomem	*mbase;
 	unsigned long	flags;
 	u16		csr;
-	u32    hsbt;
 
 	mbase = musb->mregs;
 
@@ -1576,10 +1550,6 @@ static void musb_gadget_fifo_flush(struct usb_ep *ep)
 	musb_writew(mbase, MUSB_INTRTXE, musb->intrtxe & ~(1 << epnum));
 
 	if (musb_ep->is_in) {
-		hsbt = musb_readl(mbase, MUSB_C_T_HSBT);
-		hsbt |= MUSB_CLEAR_TXBUFF_EN;
-		musb_writel(mbase, MUSB_C_T_HSBT, hsbt);
-
 		csr = musb_readw(epio, MUSB_TXCSR);
 		if (csr & MUSB_TXCSR_FIFONOTEMPTY) {
 			csr |= MUSB_TXCSR_FLUSHFIFO | MUSB_TXCSR_P_WZC_BITS;
@@ -1594,10 +1564,6 @@ static void musb_gadget_fifo_flush(struct usb_ep *ep)
 			musb_writew(epio, MUSB_TXCSR, csr);
 		}
 	} else {
-		hsbt = musb_readl(mbase, MUSB_C_T_HSBT);
-		hsbt |= MUSB_CLEAR_RXBUFF_EN;
-		musb_writel(mbase, MUSB_C_T_HSBT, hsbt);
-
 		csr = musb_readw(epio, MUSB_RXCSR);
 		csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
 		musb_writew(epio, MUSB_RXCSR, csr);

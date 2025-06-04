@@ -95,8 +95,7 @@ static void musb_h_tx_flush_fifo(struct musb_hw_ep *ep)
 
 	csr = musb_readw(epio, MUSB_TXCSR);
 	while (csr & MUSB_TXCSR_FIFONOTEMPTY) {
-		csr |= MUSB_TXCSR_FLUSHFIFO;
-		csr &= ~MUSB_TXCSR_TXPKTRDY;
+		csr |= MUSB_TXCSR_FLUSHFIFO | MUSB_TXCSR_TXPKTRDY;
 		musb_writew(epio, MUSB_TXCSR, csr);
 		csr = musb_readw(epio, MUSB_TXCSR);
 
@@ -302,6 +301,7 @@ static void musb_advance_schedule(struct musb *musb, struct urb *urb,
 {
 	struct musb_qh		*qh = musb_ep_get_qh(hw_ep, is_in);
 	struct musb_hw_ep	*ep = qh->hw_ep;
+	int			ready = qh->is_ready;
 	int			status;
 	u16			toggle;
 
@@ -320,17 +320,14 @@ static void musb_advance_schedule(struct musb *musb, struct urb *urb,
 		break;
 	}
 
+	qh->is_ready = 0;
 	musb_giveback(musb, urb, status);
-
-	/* musb->lock been unlock in musb_giveback,so sometimes qh may
-	 * been free,need get qh again
-	 */
-	qh = musb_ep_get_qh(hw_ep, is_in);
+	qh->is_ready = ready;
 
 	/* reclaim resources (and bandwidth) ASAP; deschedule it, and
 	 * invalidate qh as soon as list_empty(&hep->urb_list)
 	 */
-	if (qh != NULL && list_empty(&qh->hep->urb_list)) {
+	if (list_empty(&qh->hep->urb_list)) {
 		struct list_head	*head;
 		struct dma_controller	*dma = musb->dma_controller;
 
@@ -380,7 +377,7 @@ static void musb_advance_schedule(struct musb *musb, struct urb *urb,
 		}
 	}
 
-	if (qh != NULL && qh->is_ready && !list_empty(&qh->hep->urb_list)) {
+	if (qh != NULL && qh->is_ready) {
 		musb_dbg(musb, "... next ep%d %cX urb %p",
 		    hw_ep->epnum, is_in ? 'R' : 'T', next_urb(qh));
 		musb_start_urb(musb, is_in, qh);
@@ -2127,11 +2124,6 @@ static int musb_schedule(
 	u8			toggle;
 	u8			txtype;
 	struct urb		*urb = next_urb(qh);
-	u8			epno = usb_pipeendpoint(urb->pipe);
-	u8			last_addr;
-	u8			last_epno;
-	struct usb_host_endpoint	*last_hep = NULL;
-	struct usb_host_endpoint	*hep = qh->hep;
 
 	/* use fixed hardware for control and bulk */
 	if (qh->type == USB_ENDPOINT_XFER_CONTROL) {
@@ -2163,40 +2155,28 @@ static int musb_schedule(
 		if (hw_ep == musb->bulk_ep)
 			continue;
 
-		if (epnum < 2 + epno)
-			continue;
-
 		if (musb_dma_sprd(musb)) {
+			u8	last_addr;
+			u8	epno = usb_pipeendpoint(urb->pipe);
+
+			if ((epnum < 2 + epno) || (epnum < 10 &&
+			     qh->type == USB_ENDPOINT_XFER_INT))
+				continue;
+
 			if (musb->is_multipoint) {
 				if (is_in)
 					last_addr = musb_readb(musb->mregs,
-								musb->io.busctl_offset
-								(epnum,
+						       musb->io.busctl_offset
+						       (epnum,
 							MUSB_RXFUNCADDR));
 				else
 					last_addr = musb_readb(musb->mregs,
-								musb->io.busctl_offset
-								(epnum,
+						       musb->io.busctl_offset
+						       (epnum,
 							MUSB_TXFUNCADDR));
 				if (last_addr != 0) {
 					if (last_addr != qh->addr_reg)
 						continue;
-					else {
-						last_epno = 0;
-						if (musb_dma_sprd(musb) &&
-							(musb->is_multipoint) &&
-							hw_ep->hep[!is_in]) {
-							last_hep = hw_ep->hep[!is_in];
-							last_epno = last_hep->desc.bEndpointAddress
-							& USB_ENDPOINT_NUMBER_MASK;
-						}
-
-						musb_dbg(musb, "last_epno(%d) epno(%d)\n",
-								last_epno, epno);
-
-						if (last_epno != epno)
-							continue;
-					}
 					best_end = epnum;
 					break;
 				}
@@ -2266,7 +2246,7 @@ static int musb_schedule(
 	qh->mux = 0;
 	hw_ep = musb->endpoints + best_end;
 	if (musb_dma_sprd(musb) && (musb->is_multipoint))
-		hw_ep->hep[!is_in] = hep;
+		hw_ep->hep[!is_in] = qh->hep;
 	musb_dbg(musb, "qh %p periodic slot %d", qh, best_end);
 success:
 	if (head) {
@@ -2282,14 +2262,6 @@ success:
 }
 
 #if IS_ENABLED(CONFIG_USB_SPRD_OFFLOAD)
-/* Defined this flag to control the i2s clk configuraiton */
-static bool musb_utmi_60m_flag;
-void musb_set_utmi_60m_flag(bool flag)
-{
-	musb_utmi_60m_flag = flag;
-}
-EXPORT_SYMBOL(musb_set_utmi_60m_flag);
-
 static void musb_offload_enable(struct musb *musb, u8 bchannel)
 {
 	u32 val;
@@ -2395,17 +2367,6 @@ static void musb_offload_config(struct usb_hcd *hcd, int ep_num, int mono,
 		clkm = 4  * 24 * rate;
 	musb_writel(mbase, MUSB_AUDIO_IIS_CLKM, clkm);
 	musb_writel(mbase, MUSB_AUDIO_IIS_CLKN, MUSB_IIS_CLKN);
-
-	/* The default MUSB_IIS_CLKN(30000) is coordinate to utim 30MHz clk,
-	 * if the utmi is working at 60MHz, we should config MUSB_AUDIO_IIS_CLKN
-	 * as 60000
-	 */
-	dev_dbg(musb->controller,
-		"%s musb_utmi_60m_flag(%d)\n", __func__, musb_utmi_60m_flag);
-	if (musb_utmi_60m_flag)
-		musb_writel(mbase, MUSB_AUDIO_IIS_CLKN, MUSB_IIS_CLKN*2);
-	else
-		musb_writel(mbase, MUSB_AUDIO_IIS_CLKN, MUSB_IIS_CLKN);
 
 	tmp = musb_readl(mbase, MUSB_AUDIO_IIS_DMA_INS);
 	/* iis dma fifo width */
@@ -2580,10 +2541,6 @@ static void musb_offload_enqueue(struct usb_hcd *hcd, struct urb *urb)
 }
 
 #else
-void musb_set_utmi_60m_flag(bool flag)
-{}
-EXPORT_SYMBOL(musb_set_utmi_60m_flag);
-
 static bool musb_offload_detect(struct musb *musb, struct usb_endpoint_descriptor *epd)
 {
 	return false;
@@ -2616,10 +2573,6 @@ static int musb_urb_enqueue(
 
 	/* host role must be active */
 	if (!is_host_active(musb) || !musb->is_active)
-		return -ENODEV;
-
-	if (!musb->is_multipoint && usb_endpoint_num(epd)
-		&& (hcd->self.root_hub != urb->dev->parent))
 		return -ENODEV;
 
 	trace_musb_urb_enq(musb, urb);
@@ -2866,13 +2819,7 @@ static int musb_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	struct musb_qh		*qh;
 	unsigned long		flags;
 	int			is_in  = usb_pipein(urb->pipe);
-	struct usb_host_endpoint	*hep = urb->ep;
-	struct usb_endpoint_descriptor	*epd = &hep->desc;
 	int			ret;
-
-	if (!musb->is_multipoint && usb_endpoint_num(epd)
-		&& (hcd->self.root_hub != urb->dev->parent))
-		return 0;
 
 	trace_musb_urb_deq(musb, urb);
 
@@ -2897,16 +2844,20 @@ static int musb_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	 *
 	 * NOTE: qh is invalid unless !list_empty(&hep->urb_list)
 	 */
-	if (urb->urb_list.prev != &qh->hep->urb_list
+	if (!qh->is_ready
+			|| urb->urb_list.prev != &qh->hep->urb_list
 			|| musb_ep_get_qh(qh->hw_ep, is_in) != qh) {
+		int	ready = qh->is_ready;
 
+		qh->is_ready = 0;
 		musb_giveback(musb, urb, 0);
 		if (musb_ep_get_qh(qh->hw_ep, is_in)) {
+			qh->is_ready = ready;
 
 			/* If nothing else (usually musb_giveback) is using it
 			 * and its URB list has emptied, recycle this qh.
 			 */
-			if (qh->is_ready && list_empty(&qh->hep->urb_list)) {
+			if (ready && list_empty(&qh->hep->urb_list)) {
 				qh->hep->hcpriv = NULL;
 				list_del(&qh->ring);
 				kfree(qh);
