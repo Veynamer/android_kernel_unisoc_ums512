@@ -62,12 +62,14 @@ struct musb_hdrc_eps_bits {
 
 struct musb_hdrc_config {
 	struct musb_fifo_cfg	*fifo_cfg;	/* board fifo configuration */
+	struct musb_fifo_cfg	*host_fifo_cfg;	/* host mode fifo setting */
 	unsigned		fifo_cfg_size;	/* size of the fifo configuration */
 
 	/* MUSB configuration-specific details */
 	unsigned	multipoint:1;	/* multipoint device */
 	unsigned	dyn_fifo:1 __deprecated; /* supports dynamic fifo sizing */
-
+	unsigned	soft_con:1 __deprecated; /* soft connect required */
+	unsigned	dma:1 __deprecated; /* supports DMA */
 	/* need to explicitly de-assert the port reset after resume? */
 	unsigned	host_port_deassert_reset_at_resume:1;
 
