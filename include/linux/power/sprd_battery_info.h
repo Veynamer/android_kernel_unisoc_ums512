@@ -103,8 +103,6 @@ struct sprd_battery_info {
 	int charge_full_design_uah;
 	/* microVolts */
 	int voltage_min_design_uv;
-	/* microVolts */
-	int batt_ovp_threshold_uv;
 	/* microAmps */
 	int precharge_current_ua;
 	/* microAmps */
@@ -136,6 +134,9 @@ struct sprd_battery_info {
 	int first_capacity_calibration_voltage_uv;
 	/* percentage */
 	int first_capacity_calibration_capacity;
+
+	int force_jeita_status;
+
 	/* celsius */
 	int battery_internal_resistance_temp_table[SPRD_BATTERY_INFO_RESISTENCE_TEMP_MAX];
 	int battery_internal_resistance_temp_table_len;
@@ -148,11 +149,8 @@ struct sprd_battery_info {
 	int battery_internal_resistance_ocv_table_len;
 
 	struct sprd_battery_charge_current cur;
-	density_ocv_table *cap_calib_dens_ocv_table;
-	int cap_calib_dens_ocv_table_len;
-
-	density_ocv_table *cap_track_dens_ocv_table;
-	int cap_track_dens_ocv_table_len;
+	density_ocv_table *dens_ocv_table;
+	int dens_ocv_table_len;
 
 	struct sprd_battery_ocv_table *battery_ocv_table[SPRD_BATTERY_OCV_TEMP_MAX];
 	int battery_ocv_table_len[SPRD_BATTERY_OCV_TEMP_MAX];
@@ -175,7 +173,6 @@ struct sprd_battery_info {
 	int basp_constant_charge_voltage_max_uv_table_len;
 
 	struct sprd_battery_jeita_table *jeita_table[SPRD_BATTERY_JEITA_MAX];
-	u32 max_current_jeita_index[SPRD_BATTERY_JEITA_MAX];
 	u32 sprd_battery_jeita_size[SPRD_BATTERY_JEITA_MAX];
 
 	struct sprd_battery_ir_compensation ir;

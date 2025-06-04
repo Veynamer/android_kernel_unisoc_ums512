@@ -18,8 +18,6 @@
 #include <linux/power_supply.h>
 #include <linux/power/sprd_battery_info.h>
 #include <linux/power/sprd_vote.h>
-#include <linux/power/sprd_vchg_detect.h>
-#include <linux/power/sprd_fchg_extcon.h>
 
 enum cm_charge_info_cmd {
 	CM_CHARGE_INFO_CHARGE_LIMIT = BIT(0),
@@ -28,27 +26,21 @@ enum cm_charge_info_cmd {
 	CM_CHARGE_INFO_JEITA_LIMIT = BIT(3),
 };
 
-enum cm_charger_type_flag {
-	CM_USB_TYPE = 0,
-	CM_FCHG_TYPE,
-	CM_WL_TYPE,
-};
-
-enum cm_charger_type {
-	CM_CHARGER_TYPE_UNKNOWN = 0,
-	CM_CHARGER_TYPE_SDP,
-	CM_CHARGER_TYPE_DCP,
-	CM_CHARGER_TYPE_CDP,
-	CM_CHARGER_TYPE_FAST,
-	CM_CHARGER_TYPE_ADAPTIVE,
-	CM_WIRELESS_CHARGER_TYPE_BPP,
-	CM_WIRELESS_CHARGER_TYPE_EPP,
-};
-
-enum power_supply_wireless_charger_type {
-	POWER_SUPPLY_WIRELESS_CHARGER_TYPE_UNKNOWN = 0x20,
-	POWER_SUPPLY_WIRELESS_CHARGER_TYPE_BPP,		/* Standard wireless bpp mode */
-	POWER_SUPPLY_WIRELESS_CHARGER_TYPE_EPP,		/* Standard wireless epp mode */
+enum power_supply_charger_type {
+	POWER_SUPPLY_CHARGER_TYPE_UNKNOWN = 0,
+	POWER_SUPPLY_USB_CHARGER_TYPE_SDP,		/* Standard Downstream Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_DCP,		/* Dedicated Charging Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_CDP,		/* Charging Downstream Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_ACA,		/* Accessory Charger Adapters */
+	POWER_SUPPLY_USB_CHARGER_TYPE_C,		/* Type C Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_PD,		/* Power Delivery Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_PD_DRP,		/* PD Dual Role Port */
+	POWER_SUPPLY_USB_CHARGER_TYPE_PD_PPS,		/* PD Programmable Power Supply */
+	POWER_SUPPLY_USB_CHARGER_TYPE_APPLE_BRICK_ID,	/* Apple Charging Method */
+	POWER_SUPPLY_USB_CHARGER_TYPE_SFCP_1P0,		/* SFCP1.0 Port*/
+	POWER_SUPPLY_USB_CHARGER_TYPE_SFCP_2P0,		/* SFCP2.0 Port*/
+	POWER_SUPPLY_WIRELESS_CHARGER_TYPE_BPP,		/* BPP wireless method */
+	POWER_SUPPLY_WIRELESS_CHARGER_TYPE_EPP,		/* EPP wiresess method */
 };
 
 enum data_source {
@@ -77,7 +69,6 @@ enum cm_event_types {
 	CM_EVENT_WL_CHG_START_STOP,
 	CM_EVENT_FAST_CHARGE,
 	CM_EVENT_INT,
-	CM_EVENT_BATT_OVERVOLTAGE,
 	CM_EVENT_OTHERS,
 };
 
@@ -107,7 +98,6 @@ enum cm_charge_status {
 	CM_CHARGE_VOLTAGE_ABNORMAL = BIT(2),
 	CM_CHARGE_HEALTH_ABNORMAL = BIT(3),
 	CM_CHARGE_DURATION_ABNORMAL = BIT(4),
-	CM_CHARGE_BATT_OVERVOLTAGE = BIT(5),
 };
 
 enum cm_fast_charge_command {
@@ -135,9 +125,7 @@ enum cm_temperature_command {
 enum cm_health_command {
 	CM_FAULT_HEALTH_CMD,
 	CM_ALARM_HEALTH_CMD,
-	CM_SOFT_ALARM_HEALTH_CMD,
 	CM_BUS_ERR_HEALTH_CMD,
-	CM_GOOD_HEALTH_CMD = 0x7f7f7f7f,
 };
 
 enum cm_current_now_command {
@@ -225,23 +213,76 @@ enum uvlo_shutdown_modes {
 
 #define CM_IBAT_BUFF_CNT 7
 
-struct cm_power_supply_data {
+struct wireless_data {
 	struct power_supply_desc psd;
 	struct power_supply *psy;
-	struct charger_manager *cm;
-	int ONLINE;
+	int WIRELESS_ONLINE;
 };
 
-struct charger_type {
-	int psy_type;
-	enum cm_charger_type adap_type;
+struct ac_data {
+	struct power_supply_desc psd;
+	struct power_supply *psy;
+	int AC_ONLINE;
+};
+
+struct usb_data {
+	struct power_supply_desc psd;
+	struct power_supply *psy;
+	int USB_ONLINE;
 };
 
 /**
- * struct charger_sysfs_ctl_item
+ * struct charger_cable
+ * @extcon_name: the name of extcon device.
+ * @name: the name of charger cable(external connector).
+ * @extcon_dev: the extcon device.
+ * @wq: the workqueue to control charger according to the state of
+ *	charger cable. If charger cable is attached, enable charger.
+ *	But if charger cable is detached, disable charger.
+ * @nb: the notifier block to receive changed state from EXTCON
+ *	(External Connector) when charger cable is attached/detached.
+ * @attached: the state of charger cable.
+ *	true: the charger cable is attached
+ *	false: the charger cable is detached
+ * @charger: the instance of struct charger_regulator.
+ * @cm: the Charger Manager representing the battery.
+ */
+struct charger_cable {
+	const char *extcon_name;
+	const char *name;
+
+	/* The charger-manager use Extcon framework */
+	struct extcon_dev *extcon_dev;
+	struct notifier_block nb;
+
+	/* The state of charger cable */
+	bool attached;
+
+	struct charger_regulator *charger;
+
+	/*
+	 * Set min/max current of regulator to protect over-current issue
+	 * according to a kind of charger cable when cable is attached.
+	 */
+	u32 min_uA;
+	u32 max_uA;
+
+	struct charger_manager *cm;
+};
+
+/**
+ * struct charger_regulator
+ * @regulator_name: the name of regulator for using charger.
+ * @consumer: the regulator consumer for the charger.
  * @externally_control:
  *	Set if the charger-manager cannot control charger,
  *	the charger will be maintained with disabled state.
+ * @cables:
+ *	the array of charger cables to enable/disable charger
+ *	and set current limit according to constraint data of
+ *	struct charger_cable if only charger cable included
+ *	in the array of charger cables is attached/detached.
+ * @num_cables: the number of charger cables.
  * @attr_g: Attribute group for the charger(regulator)
  * @attr_name: "name" sysfs entry
  * @attr_state: "state" sysfs entry
@@ -249,13 +290,25 @@ struct charger_type {
  * @attr_jeita_control: "jeita_control" sysfs entry
  * @attrs: Arrays pointing to attr_name/state/externally_control for attr_g
  */
-struct charger_sysfs_ctl_item {
+struct charger_regulator {
+	/* The name of regulator for charging */
+	const char *regulator_name;
+	struct regulator *consumer;
+
 	/* charger never on when system is on */
 	int externally_control;
 
+	/*
+	 * Store constraint information related to current limit,
+	 * each cable have different condition for charging.
+	 */
+	struct charger_cable *cables;
+	int num_cables;
 	int cp_id;
 
 	struct attribute_group attr_grp;
+	struct device_attribute attr_name;
+	struct device_attribute attr_state;
 	struct device_attribute attr_stop_charge;
 	struct device_attribute attr_externally_control;
 	struct device_attribute attr_jeita_control;
@@ -263,8 +316,6 @@ struct charger_sysfs_ctl_item {
 	struct device_attribute attr_charge_pump_present;
 	struct device_attribute attr_charge_pump_current;
 	struct device_attribute attr_enable_power_path;
-	struct device_attribute attr_keep_awake;
-	struct device_attribute attr_support_fast_charge;
 	struct attribute *attrs[10];
 
 	struct charger_manager *cm;
@@ -409,7 +460,6 @@ struct cm_charge_pump_status {
 	int cp_adjust_cnt;
 	int cp_ibat_ucp_cnt;
 	int cp_taper_current;
-	bool cp_soft_alarm_event;
 	bool cp_fault_event;
 	bool cp_state_tune_log;
 
@@ -450,14 +500,6 @@ struct cm_thermal_info {
 	u32 thm_pwr;
 	int thm_adjust_cur;
 	bool need_calib_charge_lmt;
-};
-
-struct cm_jeita_info {
-	bool jeita_changed;
-	int jeita_status;
-	int jeita_temperature;
-	int temp_up_trigger;
-	int temp_down_trigger;
 };
 
 /**
@@ -604,13 +646,13 @@ struct charger_desc {
 	enum data_source battery_present;
 
 	const char **psy_charger_stat;
-	const char **psy_alt_cp_adpt_stat;
+	const char **psy_fast_charger_stat;
 	const char **psy_cp_stat;
 	const char **psy_wl_charger_stat;
 	const char **psy_cp_converter_stat;
 
-	int num_sysfs;
-	struct charger_sysfs_ctl_item *sysfs;
+	int num_charger_regulators;
+	struct charger_regulator *charger_regulators;
 	const struct attribute_group **sysfs_groups;
 
 	const char *psy_fuel_gauge;
@@ -623,7 +665,6 @@ struct charger_desc {
 
 	int cap;
 	bool measure_battery_temp;
-	bool keep_awake;
 
 	u32 charging_max_duration_ms;
 	u32 discharging_max_duration_ms;
@@ -650,7 +691,6 @@ struct charger_desc {
 	int low_temp_trigger_cnt;
 
 	u32 cap_one_time;
-	u32 default_cap_one_time;
 
 	u32 trickle_time_out;
 	u64 trickle_time;
@@ -669,16 +709,16 @@ struct charger_desc {
 
 	int thm_adjust_cur;
 
-	struct sprd_battery_jeita_table *jeita_tab_array[SPRD_BATTERY_JEITA_MAX];
-	u32 jeita_size[SPRD_BATTERY_JEITA_MAX];
-	u32 max_current_jeita_index[SPRD_BATTERY_JEITA_MAX];
 	struct sprd_battery_jeita_table *jeita_tab;
+	u32 jeita_size[SPRD_BATTERY_JEITA_MAX];
 	u32 jeita_tab_size;
-	int force_jeita_status;
+	struct sprd_battery_jeita_table *jeita_tab_array[SPRD_BATTERY_JEITA_MAX];
+
 	bool jeita_disabled;
-	struct cm_jeita_info jeita_info;
+	int force_jeita_status;
 
 	int temperature;
+
 	int internal_resist;
 	int cap_table_len;
 	struct power_supply_battery_ocv_table *cap_table;
@@ -691,13 +731,10 @@ struct charger_desc {
 	bool fixed_fchg_running;
 	bool wait_vbus_stable;
 	bool check_fixed_fchg_threshold;
-	bool force_pps_diasbled;
 	u32 fast_charge_enable_count;
 	u32 fast_charge_disable_count;
 	u32 double_ic_total_limit_current;
 	u32 cp_nums;
-	u32 psy_cp_nums;
-	bool enable_alt_cp_adapt;
 
 	bool cm_check_int;
 	bool cm_check_fault;
@@ -717,12 +754,6 @@ struct charger_desc {
 
 	struct mutex charger_type_mtx;
 	struct mutex charge_info_mtx;
-	struct mutex keep_awake_mtx;
-
-	bool xts_limit_cur;
-	int adapter_max_vbus;
-
-	u32 pd_port_partner;
 };
 
 #define PSY_NAME_MAX	30
@@ -762,7 +793,7 @@ struct charger_manager {
 	struct device *dev;
 	struct charger_desc *desc;
 
-#if IS_ENABLED(CONFIG_THERMAL)
+#ifdef CONFIG_THERMAL
 	struct thermal_zone_device *tzd_batt;
 #endif
 	bool charger_enabled;
@@ -786,10 +817,7 @@ struct charger_manager {
 	int battery_status;
 
 	struct wakeup_source *charge_ws;
-	struct wakeup_source *cp_ws;
 	struct sprd_vote *cm_charge_vote;
-	struct sprd_vchg_info *vchg_info;
-	struct sprd_fchg_info *fchg_info;
 };
 
 #if IS_ENABLED(CONFIG_CHARGER_MANAGER)
