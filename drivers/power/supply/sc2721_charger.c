@@ -37,6 +37,7 @@
 #define SC2721_CHG_DPM_MASK_SHIT		13
 
 #define SC2721_CHG_OVP_MASK			GENMASK(5, 0)
+#define SC2721_CHG_VBAT_MASK		GENMASK(9, 6)
 
 #define SC2721_CHG_TERMINATION_CURRENT_MASK	GENMASK(2, 1)
 #define SC2721_CHG_TERMINATION_CURRENT_MASK_SHIT	1
@@ -131,8 +132,9 @@ static int sc2721_set_termination_voltage(struct sc2721_charger_info *info,
 	int ret, calib_data;
 
 	calib_data = sc2721_get_calib_data(info);
+
 	if (calib_data < 0)
-		return calib_data;
+		//return calib_data;
 
 	if (vol > SC2721_TERM_VOLTAGE_MAX)
 		vol = SC2721_TERM_VOLTAGE_MAX;
@@ -177,7 +179,7 @@ static int sc2721_set_termination_voltage(struct sc2721_charger_info *info,
 		dev_err(info->dev, "failed to set charge end_v\n");
 		return ret;
 	}
-
+	printk("sprocomm sc2721_set_termination_voltage big_level=0x%x small_level=0x%x\n",big_level,small_level);
 	ret = regmap_update_bits(info->regmap,
 				 info->base + SC2721_CHG_CFG0,
 				 SC2721_CHG_CV_V_MASK,
@@ -244,9 +246,9 @@ static int sc2721_charger_hw_init(struct sc2721_charger_info *info)
 		dev_warn(info->dev, "no battery current information is supplied\n");
 
 		info->cur.sdp_cur = 500000;
-		info->cur.dcp_cur = 500000;
-		info->cur.cdp_cur = 1500000;
-		info->cur.unknown_cur = 500000;
+		info->cur.dcp_cur = 1300000;
+		info->cur.cdp_cur = 1300000;
+		info->cur.unknown_cur = 1300000;
 	}
 
 	ret = power_supply_get_battery_info(info->psy_usb, &bat_info);
@@ -282,6 +284,15 @@ static int sc2721_charger_hw_init(struct sc2721_charger_info *info)
 					     voltage_max_microvolt);
 	if (ret) {
 		dev_err(info->dev, "failed to set termination voltage\n");
+		//return ret;
+	}
+
+	ret = regmap_update_bits(info->regmap,
+				 info->base + SC2721_CHG_CFG1,
+				 SC2721_CHG_VBAT_MASK,
+				 0xF<< 6);
+	if (ret) {
+		dev_err(info->dev, "failed to set charger vbat\n");
 		return ret;
 	}
 
@@ -314,7 +325,7 @@ static int sc2721_charger_start_charge(struct sc2721_charger_info *info)
 static int sc2721_charger_stop_charge(struct sc2721_charger_info *info)
 {
 	int ret;
-
+	//dev_info(info->dev, "failed to stop charge\n");
 	ret = regmap_update_bits(info->regmap,
 				 info->base + SC2721_CHG_CFG0,
 				 SC2721_CHG_PD,
@@ -339,7 +350,7 @@ static int sc2721_charger_set_current(struct sc2721_charger_info *info, u32 cur)
 	} else {
 		temp = (cur - SC2721_CHG_CURRENT_1400MA) /
 			SC2721_CHG_CURRENT_STEP_100MA;
-		temp += SC2721_CHG_CURRENT_1400MA_REG;
+		temp += 0x16;
 	}
 
 	/* Disable charge cc mode */
@@ -603,7 +614,7 @@ sc2721_charger_usb_set_property(struct power_supply *psy,
 		ret = sc2721_set_termination_voltage(info, val->intval / 1000);
 		if (ret < 0)
 			dev_err(info->dev, "failed to set terminate voltage\n");
-		break;
+		
 
 	default:
 		ret = -EINVAL;
@@ -655,7 +666,7 @@ static enum power_supply_property sc2721_usb_props[] = {
 
 static const struct power_supply_desc sc2721_charger_desc = {
 	.name			= "sc2721_charger",
-	.type			= POWER_SUPPLY_TYPE_UNKNOWN,
+	.type			= POWER_SUPPLY_TYPE_USB,
 	.properties		= sc2721_usb_props,
 	.num_properties		= ARRAY_SIZE(sc2721_usb_props),
 	.get_property		= sc2721_charger_usb_get_property,

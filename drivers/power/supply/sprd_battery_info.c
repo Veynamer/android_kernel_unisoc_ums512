@@ -411,35 +411,36 @@ static int sprd_battery_energy_density_ocv_table_check(density_ocv_table *table,
 
 static int sprd_battery_parse_energy_density_ocv_table(struct sprd_battery_info *info,
 						       struct device_node *battery_np,
-						       struct power_supply *psy,
-						       char *name, int *table_len,
-						       density_ocv_table **dens_ocv_table)
+						       struct power_supply *psy)
 {
-	density_ocv_table *table;
+	struct sprd_battery_energy_density_ocv_table *table;
 	const __be32 *list;
 	int i, size;
 
-	list = of_get_property(battery_np, name, &size);
+	list = of_get_property(battery_np, "energy-desity-ocv-table", &size);
 	if (!list || !size)
 		return 0;
 
-	*table_len = size / (sizeof(density_ocv_table) / sizeof(int) * sizeof(__be32));
+	info->dens_ocv_table_len = size / (sizeof(density_ocv_table) /
+					   sizeof(int) * sizeof(__be32));
 
-	table = devm_kzalloc(&psy->dev, sizeof(density_ocv_table) * (*table_len + 1), GFP_KERNEL);
+	table = devm_kzalloc(&psy->dev, sizeof(density_ocv_table) *
+			     (info->dens_ocv_table_len + 1), GFP_KERNEL);
 	if (!table)
 		return -ENOMEM;
 
-	for (i = 0; i < *table_len; i++) {
+	for (i = 0; i < info->dens_ocv_table_len; i++) {
 		table[i].engy_dens_ocv_lo = be32_to_cpu(*list++);
 		table[i].engy_dens_ocv_hi = be32_to_cpu(*list++);
-		dev_info(&psy->dev, "%s: engy_dens_ocv_hi = %d, engy_dens_ocv_lo = %d\n",
-			 name, table[i].engy_dens_ocv_hi, table[i].engy_dens_ocv_lo);
+		dev_info(&psy->dev, "engy_dens_ocv_hi = %d, engy_dens_ocv_lo = %d\n",
+			 table[i].engy_dens_ocv_hi, table[i].engy_dens_ocv_lo);
 	}
 
-	*dens_ocv_table = table;
+	info->dens_ocv_table = table;
 
-	if (!sprd_battery_energy_density_ocv_table_check(*dens_ocv_table, *table_len)) {
-		dev_err(&psy->dev, "%s:  density ocv table value is wrong, please check\n", name);
+	if (!sprd_battery_energy_density_ocv_table_check(info->dens_ocv_table,
+							 info->dens_ocv_table_len)) {
+		dev_err(&psy->dev, "density ocv table value is wrong, please check\n");
 		return -EINVAL;
 	}
 
@@ -594,7 +595,7 @@ static int sprd_battery_init_jeita_table(struct sprd_battery_info *info,
 	const __be32 *list;
 	const char *np_name = sprd_battery_jeita_type_names[jeita_num];
 	struct sprd_battery_jeita_table **cur_table = &info->jeita_table[jeita_num];
-	int i, size, max_current_ua = 0;
+	int i, size;
 
 	list = of_get_property(battery_np, np_name, &size);
 	if (!list || !size)
@@ -614,10 +615,6 @@ static int sprd_battery_init_jeita_table(struct sprd_battery_info *info,
 		table[i].recovery_temp = be32_to_cpu(*list++) - 1000;
 		table[i].current_ua = be32_to_cpu(*list++);
 		table[i].term_volt = be32_to_cpu(*list++);
-		if (max_current_ua < table[i].current_ua) {
-			info->max_current_jeita_index[jeita_num] = i;
-			max_current_ua = table[i].current_ua;
-		}
 	}
 
 	*cur_table = table;
@@ -671,7 +668,6 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 
 	info->charge_full_design_uah         = -EINVAL;
 	info->voltage_min_design_uv          = -EINVAL;
-	info->batt_ovp_threshold_uv          = -EINVAL;
 	info->precharge_current_ua           = -EINVAL;
 	info->charge_term_current_ua         = -EINVAL;
 	info->constant_charge_current_max_ua = -EINVAL;
@@ -690,6 +686,7 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 	info->first_capacity_calibration_voltage_uv = -EINVAL;
 	info->first_capacity_calibration_capacity = -EINVAL;
 	info->fast_charge_ocv_threshold_uv = -EINVAL;
+	info->force_jeita_status = -EINVAL;
 	info->cur.sdp_cur = -EINVAL;
 	info->cur.sdp_limit = -EINVAL;
 	info->cur.dcp_cur = -EINVAL;
@@ -742,8 +739,6 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 			     &info->charge_full_design_uah);
 	of_property_read_u32(battery_np, "voltage-min-design-microvolt",
 			     &info->voltage_min_design_uv);
-	of_property_read_u32(battery_np, "batt-ovp-threshold-microvolt",
-			     &info->batt_ovp_threshold_uv);
 	of_property_read_u32(battery_np, "precharge-current-microamp",
 			     &info->precharge_current_ua);
 	of_property_read_u32(battery_np, "charge-term-current-microamp",
@@ -777,6 +772,8 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 			     &info->ir.us_upper_limit_uv);
 	of_property_read_u32(battery_np, "ir-cv-offset-microvolt",
 			     &info->ir.cv_upper_limit_offset_uv);
+	of_property_read_u32(battery_np, "force-jeita-status",
+			     &info->force_jeita_status);
 
 	of_property_read_u32_index(battery_np, "charge-sdp-current-microamp", 0,
 				   &info->cur.sdp_cur);
@@ -853,21 +850,9 @@ int sprd_battery_get_battery_info(struct power_supply *psy, struct sprd_battery_
 		return err;
 	}
 
-	err = sprd_battery_parse_energy_density_ocv_table(info, battery_np, psy,
-							  "cap-calib-energy-density-ocv-table",
-							  &info->cap_calib_dens_ocv_table_len,
-							  &info->cap_calib_dens_ocv_table);
+	err = sprd_battery_parse_energy_density_ocv_table(info, battery_np, psy);
 	if (err) {
-		dev_err(&psy->dev, "Fail to parse cap cali density ocv table, ret = %d\n", err);
-		return err;
-	}
-
-	err = sprd_battery_parse_energy_density_ocv_table(info, battery_np, psy,
-							  "cap-track-energy-density-ocv-table",
-							  &info->cap_track_dens_ocv_table_len,
-							  &info->cap_track_dens_ocv_table);
-	if (err) {
-		dev_err(&psy->dev, "Fail to parse cap track density ocv table, ret = %d\n", err);
+		dev_err(&psy->dev, "Fail to parse density ocv table, ret = %d\n", err);
 		return err;
 	}
 
